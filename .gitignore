@@ -1,3 +1,4 @@
 .env/
 docs/
 open-data/
+__pycache__/
