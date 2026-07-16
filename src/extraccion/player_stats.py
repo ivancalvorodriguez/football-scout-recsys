@@ -165,6 +165,11 @@ def compute_player_stats(events: list[dict[str, Any]]) -> dict[int, dict[str, An
             if fo in ("Won", "Success To Team"):
                 r["duels_won"] += 1
 
+        # Toques en el área rival (fase Finalización); mismo criterio de "toque"
+        # que a nivel equipo (ver `team_stats._touch`).
+        if _is_touch(e) and loc and F.in_penalty_area(loc):
+            r["touches_in_att_pen_area"] += 1
+
         # Aéreos (flag disperso en varios tipos) y contadores por zona.
         if F.is_aerial_won(e):
             r["aerial_won"] += 1
@@ -221,7 +226,6 @@ def _credit_sca(
     pos = shot.get("possession")
     team = shot["team"]["name"]
     i = index[shot["id"]]
-    credited: set[int] = set()
     n = 0
     for j in range(i - 1, -1, -1):
         prev = events[j]
@@ -237,11 +241,14 @@ def _credit_sca(
             prev.get("dribble", {}).get("outcome", {}).get("name") != "Complete"
         ):
             continue
+        # Se acreditan las 2 acciones ofensivas previas al tiro (criterio FBref),
+        # a quien ejecuta cada una; una misma persona puede sumar las dos. Esto es
+        # coherente con `team_stats._add_team_sca_gca`, que cuenta acciones (no
+        # ejecutantes distintos): así el SCA de equipo == suma del de sus jugadores.
         player = prev.get("player")
-        if player and player["id"] not in credited:
+        if player:
             rows[player["id"]]["sca"] += 1
-            credited.add(player["id"])
-            n += 1
+        n += 1
         if n >= 2:
             break
 

@@ -97,7 +97,9 @@ def xt_delta(start: tuple[float, float], end: tuple[float, float]) -> float:
 # --- Aéreos ------------------------------------------------------------------
 def is_aerial_won(event: dict[str, Any]) -> bool:
     """True si el evento lleva el flag `aerial_won` en su sub-objeto."""
-    subkey = event["type"]["name"].lower().replace(" ", "_").replace("*", "")
+    subkey = (
+        event["type"]["name"].lower().replace(" ", "_").replace("*", "").replace("/", "_")
+    )
     sub = event.get(subkey)
     if isinstance(sub, dict) and sub.get("aerial_won"):
         return True

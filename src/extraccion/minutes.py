@@ -22,7 +22,12 @@ def _parse_clock(value: str | None) -> float | None:
 
 
 def match_end_minute(events: list[dict[str, Any]]) -> float:
-    """Minuto final del tiempo jugado (excluye la tanda de penaltis)."""
+    """Minuto del último evento jugable (excluye la tanda de penaltis).
+
+    Incluye el descuento: un titular que juega el partido completo puede quedar
+    con ~95-100', no 90'. Es intencionado (más fiel a los minutos reales) y
+    consistente entre jugadores; el per-90 aguas abajo divide por este valor.
+    """
     end = 0.0
     for e in playable_events(events):
         end = max(end, event_seconds(e) / 60.0)

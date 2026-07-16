@@ -69,6 +69,13 @@ _TEAM_CONTEXT = [
 PLAYER_COLUMNS = _PLAYER_CONTEXT + PLAYER_METRIC_COLUMNS
 TEAM_COLUMNS = _TEAM_CONTEXT + TEAM_METRIC_COLUMNS
 
+# Métricas de tipo REAL (el resto de conteos van como INTEGER; NULL permitido).
+_PLAYER_REAL = {"xt", "xa", "xg", "npxg", "padj_def_actions"}
+_TEAM_REAL = {
+    "possession_pct", "xt", "open_play_xg", "xg", "npxg", "ppda", "field_tilt",
+    "absolute_width", "sequence_start_distance", "direct_speed", "passes_per_sequence",
+}
+
 
 def _cols_ddl(columns: Iterable[str], real_from: set[str]) -> str:
     parts = []
@@ -176,14 +183,6 @@ def init_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
-
-
-# Métricas de tipo REAL (el resto de conteos van como INTEGER; NULL permitido).
-_PLAYER_REAL = {"xt", "xa", "xg", "npxg", "padj_def_actions"}
-_TEAM_REAL = {
-    "possession_pct", "xt", "open_play_xg", "xg", "npxg", "ppda", "field_tilt",
-    "absolute_width", "sequence_start_distance", "direct_speed", "passes_per_sequence",
-}
 
 
 def _upsert(conn: sqlite3.Connection, table: str, columns: list[str], row: dict[str, Any]) -> None:
