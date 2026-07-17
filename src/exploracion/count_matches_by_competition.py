@@ -2,21 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from ..extraccion.config import DATA_ROOT
+from ..extraccion.statsbomb_io import read_json
 
-DATA_ROOT = Path("open-data/data")
 OUTPUT_PATH = Path("outputs/csv/matches_by_competition_season.csv")
-
-
-def read_json(path: Path) -> Any:
-    """Read a UTF-8 JSON file."""
-    with path.open("r", encoding="utf-8") as file:
-        return json.load(file)
 
 
 def build_match_counts(data_root: Path) -> pd.DataFrame:

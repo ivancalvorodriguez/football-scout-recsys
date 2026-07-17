@@ -10,8 +10,12 @@ independientes para poder observar sus diferencias:
   cada entidad (MMD / OT) y despues EASE (SLIM de forma cerrada) como capa de
   re-ranking aprendido.
 
-Punto de entrada de construccion: `python -m src.similitud.build`.
-Script de prueba independiente: `python -m src.similitud.probar`.
+Puntos de entrada:
+
+- `python -m src.similitud.build`   — construye y guarda los modelos.
+- `python -m src.similitud.probar`  — consulta el top-k de una entidad por nombre.
+- `python -m src.similitud.comparar` — compara los top-k entre modos de
+  normalizacion (por_liga vs global) y genera CSV + figuras.
 """
 
 from __future__ import annotations

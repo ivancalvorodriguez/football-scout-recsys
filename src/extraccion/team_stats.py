@@ -33,16 +33,6 @@ def _new_row() -> dict[str, Any]:
     return {k: 0.0 for k in keys}
 
 
-def _touch(event: dict[str, Any]) -> bool:
-    t = event["type"]["name"]
-    if t not in config.TOUCH_TYPES:
-        return False
-    if t == "Ball Receipt*":
-        if event.get("ball_receipt", {}).get("outcome", {}).get("name") == "Incomplete":
-            return False
-    return True
-
-
 def compute_team_stats(events: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
     """Devuelve {team_id: fila de métricas} para un partido (dos equipos)."""
     events = F.playable_events(events)
@@ -66,7 +56,7 @@ def compute_team_stats(events: list[dict[str, Any]]) -> dict[int, dict[str, Any]
         etype = e["type"]["name"]
         loc = F.location(e)
 
-        if _touch(e):
+        if F.is_touch(e):
             r["touches"] += 1
             if loc and F.in_final_third(loc):
                 r["final_third_touches"] += 1
@@ -104,11 +94,13 @@ def compute_team_stats(events: list[dict[str, Any]]) -> dict[int, dict[str, Any]
             r["xg"] += xg
             if outcome == "Goal":
                 r["goals"] += 1
-            if outcome in config.SHOT_ON_TARGET_OUTCOMES:
-                r["shots_on_target"] += 1
             if not is_pen:
                 r["np_shots"] += 1
                 r["npxg"] += xg
+                # Sin penaltis, igual que `player_stats`: `sot_pct` se calcula
+                # como shots_on_target/np_shots y ambos deben excluirlos.
+                if outcome in config.SHOT_ON_TARGET_OUTCOMES:
+                    r["shots_on_target"] += 1
             if s.get("type", {}).get("name") == "Open Play":
                 r["open_play_xg"] += xg
 
@@ -176,7 +168,10 @@ def compute_team_stats(events: list[dict[str, Any]]) -> dict[int, dict[str, Any]
 def _add_team_sca_gca(
     events: list[dict[str, Any]], index: dict[str, int], rows: dict[int, dict[str, Any]]
 ) -> None:
-    action_types = {"Pass", "Carry", "Dribble", "Foul Won", "Shot"}
+    """SCA/GCA de equipo. Misma definicion que `player_stats._credit_sca` (misma
+    lista `config.SCA_ACTION_TYPES` y mismo tope), para que el SCA de equipo sea
+    igual a la suma del de sus jugadores.
+    """
     for e in events:
         if e["type"]["name"] != "Shot":
             continue
@@ -192,14 +187,14 @@ def _add_team_sca_gca(
             if prev["team"]["name"] != team:
                 continue
             pt = prev["type"]["name"]
-            if pt not in action_types:
+            if pt not in config.SCA_ACTION_TYPES:
                 continue
             if pt == "Pass" and "outcome" in prev.get("pass", {}):
                 continue
             if pt == "Dribble" and prev.get("dribble", {}).get("outcome", {}).get("name") != "Complete":
                 continue
             n += 1
-            if n >= 2:
+            if n >= config.SCA_MAX_ACTIONS:
                 break
         rows[tid]["sca"] += n
         if e["shot"].get("outcome", {}).get("name") == "Goal":

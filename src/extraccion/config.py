@@ -47,11 +47,24 @@ TOUCH_TYPES = {
     "Ball Receipt*", "Carry", "Dribble", "Shot", "Clearance", "Miscontrol", "Goal Keeper",
 }
 
+# Acciones ofensivas que pueden acreditarse como Shot-Creating Action (criterio
+# FBref: las 2 ultimas acciones del equipo antes del tiro). Compartida por
+# `player_stats` y `team_stats`: el SCA de equipo debe ser igual a la suma del de
+# sus jugadores, invariante que se rompe si cada capa define su propia lista.
+SCA_ACTION_TYPES = {"Pass", "Carry", "Dribble", "Foul Won", "Shot"}
+# Numero de acciones previas al tiro que se acreditan (criterio FBref).
+SCA_MAX_ACTIONS = 2
+
 # Resultados de tiro que cuentan como "a puerta".
 SHOT_ON_TARGET_OUTCOMES = {"Goal", "Saved", "Saved to Post"}
 
 # Resultados de Duelo (Tackle) que ganan la posesión.
 TACKLE_WON_OUTCOMES = {"Won", "Success In Play", "Success Out"}
+
+# Sub-objetos donde StatsBomb puede marcar `aerial_won`: son las acciones con las
+# que el ganador de un salto resuelve el balón. No hay evento propio de "aéreo
+# ganado" (el perdedor sí lo tiene: Duel / "Aerial Lost").
+AERIAL_WON_KEYS = ("pass", "shot", "clearance", "miscontrol")
 
 # --- Catálogo de las 25 posiciones StatsBomb ---------------------------------
 # Se conservan sin agrupar (decisión de proyecto); el one-hot se genera al

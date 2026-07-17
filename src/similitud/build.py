@@ -17,17 +17,16 @@ dos, lo que permite al comparador cruzarlos sin reentrenar.
 from __future__ import annotations
 
 import argparse
-import sys
 import time
 from pathlib import Path
 
 from . import config, data, features, formulacion2, formulacion5
+from .consulta import configurar_consola
+from .features import NORMALIZACIONES_VALIDAS
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+configurar_consola()
 
 _FORMULACIONES = {"2": formulacion2, "5": formulacion5}
-_NORMALIZACIONES_VALIDAS = ("por_liga", "global")
 
 
 def _construir_uno(
@@ -67,7 +66,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--entidad", choices=["jugador", "equipo", "ambas"], default="ambas",
                    help="Tipo de entidad a modelar.")
     p.add_argument("--normalizacion",
-                   choices=[*_NORMALIZACIONES_VALIDAS, "ambas"],
+                   choices=[*NORMALIZACIONES_VALIDAS, "ambas"],
                    default="ambas",
                    help=("Modo de estandarizacion: 'por_liga' (z-score por competicion-temporada, "
                          "el comportamiento previo) o 'global' (z-score con todo el dataset, "
@@ -77,7 +76,7 @@ def main(argv: list[str] | None = None) -> None:
     formulaciones = ["2", "5"] if args.formulacion == "ambas" else [args.formulacion]
     entidades = ["jugador", "equipo"] if args.entidad == "ambas" else [args.entidad]
     normalizaciones = (
-        list(_NORMALIZACIONES_VALIDAS)
+        list(NORMALIZACIONES_VALIDAS)
         if args.normalizacion == "ambas"
         else [args.normalizacion]
     )

@@ -10,6 +10,7 @@ consultas por nombre.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pandas as pd
@@ -24,6 +25,17 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     return sqlite3.connect(uri, uri=True)
 
 
+def _leer(sql: str, db_path: Path) -> pd.DataFrame:
+    """Ejecuta una consulta y cierra la conexion.
+
+    `contextlib.closing` es necesario: el context manager propio de una conexion
+    sqlite3 hace commit/rollback pero NO la cierra, asi que un `with conn:` a
+    secas deja la conexion abierta.
+    """
+    with closing(_connect(db_path)) as conn:
+        return pd.read_sql(sql, conn)
+
+
 def cargar_jugadores(db_path: Path) -> pd.DataFrame:
     """Una fila por (jugador, partido) con nombre, liga y minutos.
 
@@ -36,8 +48,7 @@ def cargar_jugadores(db_path: Path) -> pd.DataFrame:
         JOIN players pl ON pl.player_id = p.player_id
         JOIN matches m ON m.match_id = p.match_id
     """
-    with _connect(db_path) as conn:
-        df = pd.read_sql(sql, conn)
+    df = _leer(sql, db_path)
     df = df.rename(columns={"player_id": "entity_id"})
     df[LEAGUE_KEY] = (
         df["competition_id"].astype(str) + "-" + df["season_id"].astype(str)
@@ -58,8 +69,7 @@ def cargar_equipos(db_path: Path) -> pd.DataFrame:
         JOIN teams te ON te.team_id = t.team_id
         JOIN matches m ON m.match_id = t.match_id
     """
-    with _connect(db_path) as conn:
-        df = pd.read_sql(sql, conn)
+    df = _leer(sql, db_path)
     df = df.rename(columns={"team_id": "entity_id"})
     df[LEAGUE_KEY] = (
         df["competition_id"].astype(str) + "-" + df["season_id"].astype(str)

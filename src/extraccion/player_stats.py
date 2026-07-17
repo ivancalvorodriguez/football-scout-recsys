@@ -16,10 +16,6 @@ from typing import Any
 from . import config, features as F
 
 
-# Acciones ofensivas consideradas para Shot-Creating Actions (SCA).
-_SCA_ACTION_TYPES = {"Pass", "Carry", "Dribble", "Foul Won", "Shot"}
-
-
 def _new_row() -> dict[str, Any]:
     keys = [
         # Progresión
@@ -41,17 +37,6 @@ def _new_row() -> dict[str, Any]:
         "pressures", "pressure_regains", "counterpressures",
     ]
     return {k: 0.0 for k in keys}
-
-
-def _is_touch(event: dict[str, Any]) -> bool:
-    t = event["type"]["name"]
-    if t not in config.TOUCH_TYPES:
-        return False
-    if t == "Ball Receipt*":
-        outcome = event.get("ball_receipt", {}).get("outcome", {})
-        if outcome.get("name") == "Incomplete":
-            return False
-    return True
 
 
 def compute_player_stats(events: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
@@ -166,8 +151,8 @@ def compute_player_stats(events: list[dict[str, Any]]) -> dict[int, dict[str, An
                 r["duels_won"] += 1
 
         # Toques en el área rival (fase Finalización); mismo criterio de "toque"
-        # que a nivel equipo (ver `team_stats._touch`).
-        if _is_touch(e) and loc and F.in_penalty_area(loc):
+        # que a nivel equipo (`F.is_touch`).
+        if F.is_touch(e) and loc and F.in_penalty_area(loc):
             r["touches_in_att_pen_area"] += 1
 
         # Aéreos (flag disperso en varios tipos) y contadores por zona.
@@ -233,7 +218,7 @@ def _credit_sca(
             break
         if prev["team"]["name"] != team:
             continue
-        if prev["type"]["name"] not in _SCA_ACTION_TYPES:
+        if prev["type"]["name"] not in config.SCA_ACTION_TYPES:
             continue
         if prev["type"]["name"] == "Pass" and "outcome" in prev.get("pass", {}):
             continue  # solo pases completados
@@ -249,7 +234,7 @@ def _credit_sca(
         if player:
             rows[player["id"]]["sca"] += 1
         n += 1
-        if n >= 2:
+        if n >= config.SCA_MAX_ACTIONS:
             break
 
 

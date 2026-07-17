@@ -33,11 +33,13 @@ class IndiceEntidades:
 
 
 def indexar_entidades(mf: MatrizFeatures) -> IndiceEntidades:
-    """Asigna a cada entidad un indice 0..P-1 (orden de primera aparicion)."""
-    ids, first_idx, inverse = np.unique(
-        mf.entity_id, return_index=True, return_inverse=True
-    )
-    # `np.unique` ordena por id; recuperamos el nombre de cada id.
+    """Asigna a cada entidad un indice 0..P-1, en orden creciente de `entity_id`.
+
+    El orden lo fija `np.unique` (por id, no por aparicion) y es estable entre
+    ejecuciones, que es lo que importa: las filas de `S` se alinean con `ids`.
+    """
+    ids, inverse = np.unique(mf.entity_id, return_inverse=True)
+    # Nombre de cada id (el id es la identidad; el nombre es solo para mostrar).
     names_by_id = {int(i): n for i, n in zip(mf.entity_id, mf.entity_name)}
     names = [str(names_by_id[int(i)]) for i in ids]
     return IndiceEntidades(ids=ids, names=names, row_entity=inverse.astype(np.int64))
@@ -60,19 +62,22 @@ def features_display(mf: MatrizFeatures, idx: IndiceEntidades) -> np.ndarray:
 
 
 def ligas_por_entidad(mf: MatrizFeatures, idx: IndiceEntidades) -> dict[str, list[str]]:
-    """Ligas (competition-season) en las que aparece cada entidad, ordenadas.
+    """Ligas (competition-season) en las que aparece cada entidad.
 
-    Se serializa en `meta` para que el comparador pueda etiquetar candidatos con
-    su liga sin tener que reabrir la BD.
+    Se serializa en `meta` para poder etiquetar candidatos con su liga sin tener
+    que reabrir la BD. Se indexa por `entity_id` (como str, por JSON) y NO por
+    nombre: dos jugadores pueden llamarse igual y agrupar por nombre fusionaria
+    sus ligas. Para pasar de indice de fila de `S` a esta clave:
+    `str(modelo.entity_ids[i])`.
     """
-    ligas: dict[str, list[str]] = {n: [] for n in idx.names}
-    seen: dict[str, set[str]] = {n: set() for n in idx.names}
+    ligas: dict[str, list[str]] = {str(i): [] for i in idx.ids}
+    seen: dict[str, set[str]] = {str(i): set() for i in idx.ids}
     for row, ent in enumerate(idx.row_entity):
         liga = str(mf.league[row])
-        nombre = idx.names[int(ent)]
-        if liga not in seen[nombre]:
-            seen[nombre].add(liga)
-            ligas[nombre].append(liga)
+        clave = str(idx.ids[int(ent)])
+        if liga not in seen[clave]:
+            seen[clave].add(liga)
+            ligas[clave].append(liga)
     return ligas
 
 

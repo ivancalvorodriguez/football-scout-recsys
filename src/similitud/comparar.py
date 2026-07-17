@@ -21,8 +21,7 @@ Las figuras se escriben en `--out-dir` (default ``outputs/comparativa``).
 from __future__ import annotations
 
 import argparse
-import sys
-import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
@@ -31,40 +30,66 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
 from . import config
+from .consulta import ErrorResolucion, configurar_consola, resolver
+from .features import NORMALIZACIONES_VALIDAS
 from .modelo import cargar_modelo, top_k
 
-
-# --- Resolucion de nombres ---------------------------------------------------
-
-def _norm(s: str) -> str:
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
-    return s.lower().strip()
-
-
-def _resolver(nombre: str, entity_names: list[str]) -> int:
-    objetivo = _norm(nombre)
-    nombres_norm = [_norm(n) for n in entity_names]
-    for i, n in enumerate(nombres_norm):
-        if n == objetivo:
-            return i
-    candidatos = [i for i, n in enumerate(nombres_norm) if objetivo in n]
-    if len(candidatos) == 1:
-        return candidatos[0]
-    if not candidatos:
-        raise SystemExit(f"No se encontro ninguna entidad que contenga {nombre!r}.")
-    opciones = ", ".join(entity_names[i] for i in candidatos[:10])
-    raise SystemExit(f"Ambiguo {nombre!r}; coincide con: {opciones} ...")
+configurar_consola()
 
 
 # --- Calculo -----------------------------------------------------------------
 
+@dataclass
+class _Comparacion:
+    """Resultado de comparar los modos de normalizacion para UNA referencia.
+
+    La identidad es `idx` (indice de entidad), nunca el nombre: dos entidades
+    pueden compartir nombre, y dos consultas distintas ("Messi", "Lionel Messi")
+    pueden resolver a la misma. El nombre es solo etiqueta de presentacion.
+    """
+
+    idx: int
+    nombre: str
+    tops: dict[str, list[tuple[str, float]]]  # modo -> [(candidato, score), ...]
+    jaccard: float
+
+    def candidatos(self, modo: str) -> list[str]:
+        return [n for n, _ in self.tops[modo]]
+
+
 def _rankings(modelo, ref_idx: int, k: int) -> list[tuple[str, float]]:
     """Top-k como [(nombre, score), ...] segun el modelo."""
     return [(modelo.entity_names[j], float(s)) for j, s in top_k(modelo, ref_idx, k)]
+
+
+def _ligas_del_modelo(modelo) -> set[str]:
+    """Ligas (competition-season) que cubre el modelo, segun su `meta`."""
+    return {
+        liga
+        for ligas in modelo.meta.get("ligas_por_entidad", {}).values()
+        for liga in ligas
+    }
+
+
+def _avisar_si_una_sola_liga(modelo) -> None:
+    """Avisa si comparar `por_liga` contra `global` no puede dar informacion.
+
+    Con una unica liga-temporada en la BD, el z-score por liga y el global se
+    calculan sobre las mismas filas: son la MISMA transformacion, los modelos
+    salen identicos y el Jaccard es 1.00 siempre. El resultado no es un hallazgo
+    ("las normalizaciones coinciden"), es una comparacion vacia.
+    """
+    ligas = _ligas_del_modelo(modelo)
+    if len(ligas) > 1:
+        return
+    unica = next(iter(ligas), "ninguna")
+    print(
+        f"  [AVISO] El modelo cubre una sola liga-temporada ({unica}): 'por_liga' y\n"
+        f"          'global' son la misma transformacion, asi que el Jaccard sera 1.00\n"
+        f"          por construccion. Para que la comparacion diga algo, extrae al\n"
+        f"          menos 2 competicion-temporada a la misma BD."
+    )
 
 
 def _jaccard(a: list[str], b: list[str]) -> float:
@@ -85,6 +110,22 @@ def _rank_comun(top_a: list[str], top_b: list[str]) -> dict[str, tuple[int, int]
 
 # --- Salidas -----------------------------------------------------------------
 
+def _etiquetas(comparaciones: list[_Comparacion]) -> list[str]:
+    """Etiqueta de cada referencia para los ejes de las figuras.
+
+    Dos entidades distintas pueden compartir nombre; en ese caso se anexa el
+    indice para que cada barra/fila sea identificable.
+    """
+    repetidos = {
+        c.nombre for c in comparaciones
+        if sum(o.nombre == c.nombre for o in comparaciones) > 1
+    }
+    return [
+        f"{c.nombre} [#{c.idx}]" if c.nombre in repetidos else c.nombre
+        for c in comparaciones
+    ]
+
+
 def _escribir_csv(
     path: Path,
     filas: list[dict],
@@ -94,9 +135,7 @@ def _escribir_csv(
 
 def _plot_heatmap(
     path: Path,
-    referencias: list[str],
-    top_a_por_ref: dict[str, list[str]],
-    top_b_por_ref: dict[str, list[str]],
+    comparaciones: list[_Comparacion],
     modo_a: str,
     modo_b: str,
     k: int,
@@ -107,12 +146,17 @@ def _plot_heatmap(
     numero de la celda es la posicion en B (o 0 si no aparece). Asi se ve
     visualmente que candidatos "se mueven" entre modos.
     """
-    fig, ax = plt.subplots(figsize=(max(6, 0.6 * k + 2), max(4, 0.5 * len(referencias) + 2)))
-    M = np.zeros((len(referencias), k), dtype=int)
-    anot = [[""] * k for _ in range(len(referencias))]
-    for i, ref in enumerate(referencias):
-        pos_b = {n: r for r, n in enumerate(top_b_por_ref[ref], 1)}
-        for j, cand in enumerate(top_a_por_ref[ref]):
+    etiquetas = _etiquetas(comparaciones)
+    fig, ax = plt.subplots(
+        figsize=(max(6, 0.6 * k + 2), max(4, 0.5 * len(comparaciones) + 2))
+    )
+    M = np.zeros((len(comparaciones), k), dtype=int)
+    # "—" por defecto: cubre tanto "no aparece en B" como las posiciones que el
+    # top-k de A no llega a llenar (`top_k` puede devolver menos de k).
+    anot = [["—"] * k for _ in range(len(comparaciones))]
+    for i, c in enumerate(comparaciones):
+        pos_b = {n: r for r, n in enumerate(c.candidatos(modo_b), 1)}
+        for j, cand in enumerate(c.candidatos(modo_a)):
             r = pos_b.get(cand, 0)
             M[i, j] = r
             anot[i][j] = f"#{r}" if r else "—"
@@ -120,12 +164,12 @@ def _plot_heatmap(
     im = ax.imshow(M, aspect="auto", cmap="viridis", vmin=0, vmax=k)
     ax.set_xticks(range(k))
     ax.set_xticklabels([f"#{j+1}" for j in range(k)])
-    ax.set_yticks(range(len(referencias)))
-    ax.set_yticklabels(referencias)
+    ax.set_yticks(range(len(comparaciones)))
+    ax.set_yticklabels(etiquetas)
     ax.set_xlabel(f"Posicion en top-{k} de A ({modo_a})")
     ax.set_ylabel("Referencia")
     ax.set_title(f"Posicion del candidato en B ({modo_b})\n0 = no aparece en top-{k}")
-    for i in range(len(referencias)):
+    for i in range(len(comparaciones)):
         for j in range(k):
             ax.text(j, i, anot[i][j], ha="center", va="center",
                     color="white" if M[i, j] <= k // 2 else "black", fontsize=8)
@@ -190,16 +234,17 @@ def _plot_ranking_paralelo(
 
 def _plot_jaccard(
     path: Path,
-    referencias: list[str],
-    jaccards: list[float],
+    comparaciones: list[_Comparacion],
     modo_a: str,
     modo_b: str,
     k: int,
 ) -> None:
-    fig, ax = plt.subplots(figsize=(max(6, 0.6 * len(referencias) + 2), 4))
-    bars = ax.bar(range(len(referencias)), jaccards, color="#4c72b0")
-    ax.set_xticks(range(len(referencias)))
-    ax.set_xticklabels(referencias, rotation=30, ha="right")
+    etiquetas = _etiquetas(comparaciones)
+    jaccards = [c.jaccard for c in comparaciones]
+    fig, ax = plt.subplots(figsize=(max(6, 0.6 * len(comparaciones) + 2), 4))
+    bars = ax.bar(range(len(comparaciones)), jaccards, color="#4c72b0")
+    ax.set_xticks(range(len(comparaciones)))
+    ax.set_xticklabels(etiquetas, rotation=30, ha="right")
     ax.set_ylim(0.0, 1.0)
     ax.set_ylabel("Jaccard")
     ax.set_title(
@@ -228,6 +273,12 @@ def _comparar_para(
 ) -> None:
     if len(normalizaciones) < 2:
         raise SystemExit("Hace falta al menos 2 normalizaciones para comparar.")
+    desconocidas = [m for m in normalizaciones if m not in NORMALIZACIONES_VALIDAS]
+    if desconocidas:
+        raise SystemExit(
+            f"Normalizacion(es) desconocida(s): {', '.join(desconocidas)}. "
+            f"Validas: {', '.join(NORMALIZACIONES_VALIDAS)}."
+        )
 
     # Carga ambos modelos. Ambos comparten el mismo entity_names (mismo universo).
     modelos = {
@@ -235,95 +286,75 @@ def _comparar_para(
         for m in normalizaciones
     }
     nombres_ref = modelos[normalizaciones[0]].entity_names
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    filas_csv: list[dict] = []
-    top_por_ref_modo: dict[str, dict[str, list[str]]] = {}
-    jaccards: list[float] = []
+    modo_a, modo_b = normalizaciones[0], normalizaciones[1]
 
     print(f"\n=== Comparador | {entidad} | formulacion {formulacion} ===")
     print(f"Modos: {' vs '.join(normalizaciones)}    k={k}    refs={len(referencias)}")
+    if set(normalizaciones) == set(NORMALIZACIONES_VALIDAS):
+        _avisar_si_una_sola_liga(modelos[modo_a])
+
+    comparaciones: list[_Comparacion] = []
+    vistas: set[int] = set()
     for ref in referencias:
         # Resolver en el primer modelo; los nombres son los mismos en todos.
         try:
-            i = _resolver(ref, nombres_ref)
-        except SystemExit as e:
+            i = resolver(ref, nombres_ref)
+        except ErrorResolucion as e:
             print(f"  [aviso] referencia omitida: {e}")
             continue
-        ref_nombre = nombres_ref[i]
-        top_por_ref_modo[ref_nombre] = {}
-        per_ref: dict[str, list[tuple[str, float]]] = {}
-        for modo in normalizaciones:
-            per_ref[modo] = _rankings(modelos[modo], i, k)
-            top_por_ref_modo[ref_nombre][modo] = [n for n, _ in per_ref[modo]]
-            for rango, (cand, score) in enumerate(per_ref[modo], 1):
-                filas_csv.append({
-                    "referencia": ref_nombre,
-                    "modo": modo,
-                    "rank": rango,
-                    "candidato": cand,
-                    "score": score,
-                })
-        j = _jaccard(top_por_ref_modo[ref_nombre][normalizaciones[0]],
-                     top_por_ref_modo[ref_nombre][normalizaciones[1]])
-        comunes = _rank_comun(
-            top_por_ref_modo[ref_nombre][normalizaciones[0]],
-            top_por_ref_modo[ref_nombre][normalizaciones[1]],
-        )
-        jaccards.append(j)
+        if i in vistas:
+            print(f"  [aviso] referencia duplicada omitida: {ref!r} -> {nombres_ref[i]}")
+            continue
+        vistas.add(i)
+
+        tops = {modo: _rankings(modelos[modo], i, k) for modo in normalizaciones}
+        cand_a = [n for n, _ in tops[modo_a]]
+        cand_b = [n for n, _ in tops[modo_b]]
+        comparaciones.append(_Comparacion(
+            idx=i, nombre=nombres_ref[i], tops=tops, jaccard=_jaccard(cand_a, cand_b),
+        ))
+        comunes = _rank_comun(cand_a, cand_b)
         print(
-            f"  {ref_nombre:<40s}  Jaccard={j:.2f}  "
+            f"  {nombres_ref[i]:<40s}  Jaccard={comparaciones[-1].jaccard:.2f}  "
             f"interseccion={len(comunes)}/{k}"
         )
 
-    if not jaccards:
+    if not comparaciones:
         print("  (sin referencias validas, nada que escribir)")
         return
 
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     # CSV
+    filas_csv = [
+        {"referencia": c.nombre, "modo": modo, "rank": rango,
+         "candidato": cand, "score": score}
+        for c in comparaciones
+        for modo in normalizaciones
+        for rango, (cand, score) in enumerate(c.tops[modo], 1)
+    ]
     csv_path = out_dir / f"comparativa_form{formulacion}_{entidad}.csv"
     _escribir_csv(csv_path, filas_csv)
     print(f"  CSV  -> {csv_path}")
 
-    modo_a, modo_b = normalizaciones[0], normalizaciones[1]
-    refs = list(top_por_ref_modo.keys())
-
     # Heatmap
     heat_path = out_dir / f"heatmap_form{formulacion}_{entidad}.png"
-    _plot_heatmap(
-        heat_path, refs,
-        {r: top_por_ref_modo[r][modo_a] for r in refs},
-        {r: top_por_ref_modo[r][modo_b] for r in refs},
-        modo_a, modo_b, k,
-    )
+    _plot_heatmap(heat_path, comparaciones, modo_a, modo_b, k)
     print(f"  Heat -> {heat_path}")
 
     # Barras de Jaccard
     jacc_path = out_dir / f"jaccard_form{formulacion}_{entidad}.png"
-    _plot_jaccard(jacc_path, refs, jaccards, modo_a, modo_b, k)
+    _plot_jaccard(jacc_path, comparaciones, modo_a, modo_b, k)
     print(f"  Jacc -> {jacc_path}")
 
-    # Ranking paralelo: uno por referencia
-    # Recomponemos (nombre, score) por modo desde filas_csv para reutilizar todo
-    # el calculo previo sin recalcular.
-    scores_por_ref_modo: dict[str, dict[str, list[tuple[str, float]]]] = {
-        r: {m: [] for m in normalizaciones} for r in refs
-    }
-    for fila in filas_csv:
-        r = fila["referencia"]
-        m = fila["modo"]
-        if r in scores_por_ref_modo and m in scores_por_ref_modo[r]:
-            scores_por_ref_modo[r][m].append((fila["candidato"], fila["score"]))
-    for ref in refs:
-        safe = "".join(c if c.isalnum() else "_" for c in ref)[:60]
+    # Ranking paralelo: uno por referencia.
+    for c in comparaciones:
+        safe = "".join(ch if ch.isalnum() else "_" for ch in c.nombre)[:60]
         path = out_dir / f"ranking_form{formulacion}_{entidad}_{safe}.png"
         _plot_ranking_paralelo(
-            path, ref,
-            scores_por_ref_modo[ref][modo_a],
-            scores_por_ref_modo[ref][modo_b],
-            modo_a, modo_b, k,
+            path, c.nombre, c.tops[modo_a], c.tops[modo_b], modo_a, modo_b, k,
         )
-    print(f"  Rank -> {len(refs)} figuras en {out_dir}")
+    print(f"  Rank -> {len(comparaciones)} figuras en {out_dir}")
 
 
 def main(argv: list[str] | None = None) -> None:

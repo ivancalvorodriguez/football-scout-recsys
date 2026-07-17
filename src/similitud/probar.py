@@ -18,40 +18,15 @@ liga).
 from __future__ import annotations
 
 import argparse
-import sys
-import unicodedata
 from pathlib import Path
 
 import numpy as np
 
-# La consola de Windows (cp1252) no imprime nombres con caracteres no latinos-1
-# (p. ej. la 'ğ' de algunos jugadores). Forzamos UTF-8 en la salida.
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
 from . import config
+from .consulta import ErrorResolucion, configurar_consola, resolver
 from .modelo import ModeloSimilitud, cargar_modelo, top_k
 
-
-def _norm(s: str) -> str:
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
-    return s.lower().strip()
-
-
-def _resolver(modelo: ModeloSimilitud, nombre: str) -> int:
-    objetivo = _norm(nombre)
-    nombres_norm = [_norm(n) for n in modelo.entity_names]
-    # 1) coincidencia exacta; 2) parcial (subcadena).
-    for i, n in enumerate(nombres_norm):
-        if n == objetivo:
-            return i
-    candidatos = [i for i, n in enumerate(nombres_norm) if objetivo in n]
-    if len(candidatos) == 1:
-        return candidatos[0]
-    if not candidatos:
-        raise SystemExit(f"No se encontro ninguna entidad que contenga {nombre!r}.")
-    opciones = ", ".join(modelo.entity_names[i] for i in candidatos[:10])
-    raise SystemExit(f"Ambiguo {nombre!r}; coincide con: {opciones} ...")
+configurar_consola()
 
 
 def _metricas_clave(
@@ -74,7 +49,10 @@ def _consultar(
     nombre: str, k: int,
 ) -> None:
     modelo = cargar_modelo(model_dir, formulacion, entidad, normalizacion=normalizacion)
-    i = _resolver(modelo, nombre)
+    try:
+        i = resolver(nombre, modelo.entity_names)
+    except ErrorResolucion as e:
+        raise SystemExit(str(e)) from e
     print(f"\n=== Formulacion {formulacion} | {entidad} | {normalizacion} ===")
     print(f"Referencia: {modelo.entity_names[i]}")
     print(f"({modelo.meta.get('descripcion','')})")

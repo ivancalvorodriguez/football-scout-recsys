@@ -47,6 +47,23 @@ def in_final_third(point: tuple[float, float]) -> bool:
     return point[0] >= config.FINAL_THIRD_X
 
 
+# --- Toques ------------------------------------------------------------------
+def is_touch(event: dict[str, Any]) -> bool:
+    """True si el evento cuenta como "toque" del jugador/equipo que lo ejecuta.
+
+    Criterio unico para `touches_in_att_pen_area` (jugador) y para
+    `touches`/`field_tilt` (equipo): un `Ball Receipt*` fallido no es un toque.
+    """
+    etype = event["type"]["name"]
+    if etype not in config.TOUCH_TYPES:
+        return False
+    if etype == "Ball Receipt*":
+        outcome = event.get("ball_receipt", {}).get("outcome", {})
+        if outcome.get("name") == "Incomplete":
+            return False
+    return True
+
+
 # --- Pases -------------------------------------------------------------------
 def is_pass(event: dict[str, Any]) -> bool:
     return event["type"]["name"] == "Pass"
@@ -96,17 +113,16 @@ def xt_delta(start: tuple[float, float], end: tuple[float, float]) -> float:
 
 # --- Aéreos ------------------------------------------------------------------
 def is_aerial_won(event: dict[str, Any]) -> bool:
-    """True si el evento lleva el flag `aerial_won` en su sub-objeto."""
-    subkey = (
-        event["type"]["name"].lower().replace(" ", "_").replace("*", "").replace("/", "_")
-    )
-    sub = event.get(subkey)
-    if isinstance(sub, dict) and sub.get("aerial_won"):
-        return True
-    # Algunos flags viven en 'pass'/'shot'/'clearance'/'miscontrol'.
-    for key in ("pass", "shot", "clearance", "miscontrol"):
-        s = event.get(key)
-        if isinstance(s, dict) and s.get("aerial_won"):
+    """True si el evento lleva el flag `aerial_won`.
+
+    StatsBomb no emite un evento "duelo aereo ganado": marca `aerial_won` en la
+    accion con la que el ganador resuelve el salto, y esa accion solo puede ser
+    de estos cuatro tipos (ver `AERIAL_WON_KEYS`). El perdedor si recibe un
+    evento propio (`Duel` / "Aerial Lost", ver `is_aerial_lost`).
+    """
+    for key in config.AERIAL_WON_KEYS:
+        sub = event.get(key)
+        if isinstance(sub, dict) and sub.get("aerial_won"):
             return True
     return False
 
@@ -120,7 +136,12 @@ def is_aerial_lost(event: dict[str, Any]) -> bool:
 
 # --- Tiempo y periodos -------------------------------------------------------
 def event_seconds(event: dict[str, Any]) -> float:
-    """Segundos absolutos dentro del periodo (minute*60 + second)."""
+    """Segundos de reloj de partido (minute*60 + second).
+
+    `minute` en StatsBomb es acumulado desde el inicio del partido (no se
+    reinicia en cada periodo), asi que el valor es directamente comparable entre
+    eventos del mismo partido e incluye el descuento.
+    """
     return event.get("minute", 0) * 60 + event.get("second", 0)
 
 
