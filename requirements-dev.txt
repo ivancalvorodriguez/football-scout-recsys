@@ -1,0 +1,9 @@
+-r requirements.txt
+pytest==9.1.1
+
+# Cobertura (informe de lineas ejecutadas): `pytest --cov=src`.
+pytest-cov==7.1.0
+
+# Las pruebas de MUTACION usan mutmut, que no corre en Windows nativo: viven en
+# un venv de Linux/WSL (ver requirements-mutmut.txt, tools/setup_mutmut_wsl.sh y
+# docs/pruebas.md). Por eso mutmut NO se instala aqui.

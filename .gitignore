@@ -2,3 +2,15 @@
 docs/
 open-data/
 __pycache__/
+
+.dev/
+
+__pycache__/
+
+# Cobertura (pytest --cov).
+.coverage
+
+# Pruebas de mutacion (mutmut): arbol de mutantes y cache, regenerables.
+mutants/
+.mutmut-cache
+html/

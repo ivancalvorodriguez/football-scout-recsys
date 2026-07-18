@@ -1,0 +1,6 @@
+# Dependencias del entorno de MUTACION, que vive en un venv de Linux/WSL
+# (mutmut no corre en Windows nativo). Lo instala tools/setup_mutmut_wsl.sh.
+# Reproduce las versiones de runtime del proyecto para que las pruebas se
+# comporten igual que en Windows.
+-r requirements-dev.txt
+mutmut==3.6.0
