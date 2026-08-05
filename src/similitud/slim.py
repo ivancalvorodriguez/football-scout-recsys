@@ -92,6 +92,7 @@ def slim_instancia(
     l1: float,
     max_iter: int = 200,
     tol: float = 1e-4,
+    progreso=None,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Formulacion 2: aprende W (M x M) instancia-instancia.
 
@@ -119,6 +120,8 @@ def slim_instancia(
         nz = w > 0.0
         cols_idx.append(cand[nz].astype(np.int64))
         cols_val.append(w[nz])
+        if progreso is not None:  # avance del bucle mas caro del ajuste F2
+            progreso(s + 1, M)
     return cols_idx, cols_val
 
 
@@ -128,6 +131,7 @@ def agregar_W_a_entidades(
     row_entity: np.ndarray,
     weight: np.ndarray,
     n_entities: int,
+    simetrizar: bool = True,
 ) -> np.ndarray:
     """Agrega bloques de W a similitud entidad-entidad (Formulacion 2).
 
@@ -139,6 +143,11 @@ def agregar_W_a_entidades(
 
     `row_entity[i]` = indice de entidad (0..n_entities-1) de la observacion i.
     Se recorre W por columnas (coste O(nnz)).
+
+    ``simetrizar`` (por defecto True) devuelve la S servible ``0.5*(S+S^T)``. Con
+    False se devuelve la S CRUDA direccional (sin simetrizar), que el harness de
+    evaluacion usa para medir la asimetria que el pipeline corrige (sanity check
+    de la Fase 0); en produccion siempre se simetriza.
     """
     num = np.zeros((n_entities, n_entities), dtype=float)
     # Masa total por entidad (denominador Z).
@@ -159,7 +168,8 @@ def agregar_W_a_entidades(
     S = num / masa_prod
     # Similitud simetrizada: la Formulacion 2 aprende una W asimetrica
     # (contribucion direccional); se promedia para un ranking estable.
-    S = 0.5 * (S + S.T)
+    if simetrizar:
+        S = 0.5 * (S + S.T)
     np.fill_diagonal(S, 0.0)
     return S
 

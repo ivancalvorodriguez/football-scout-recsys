@@ -115,9 +115,14 @@ def _sinkhorn_costo(
 
 
 def similitud_sinkhorn(
-    mf: MatrizFeatures, ent_idx: np.ndarray, n_ent: int
+    mf: MatrizFeatures, ent_idx: np.ndarray, n_ent: int, progreso=None
 ) -> np.ndarray:
-    """S[a,b] = exp(-OT(nube_a, nube_b)); OT entropico exacto por pares."""
+    """S[a,b] = exp(-OT(nube_a, nube_b)); OT entropico exacto por pares.
+
+    ``progreso`` (opcional): callable ``progreso(hecho, total)`` invocado por cada
+    entidad del bucle externo (O(n_ent^2) pares de transporte optimo); permite
+    seguir el avance. None (por defecto) no hace nada.
+    """
     filas_por_ent = [np.where(ent_idx == e)[0] for e in range(n_ent)]
     reg, iters = config.F5_SINKHORN_REG, config.F5_SINKHORN_ITERS
     costo = np.zeros((n_ent, n_ent), dtype=float)
@@ -128,6 +133,8 @@ def similitud_sinkhorn(
             Rb = filas_por_ent[b]
             c = _sinkhorn_costo(Xa, wa, mf.X[Rb], mf.weight[Rb], reg, iters)
             costo[a, b] = costo[b, a] = c
+        if progreso is not None:
+            progreso(a + 1, n_ent)
     # Kernel gaussiano sobre el coste OT con ancho = mediana de los costes: en
     # ~30 dimensiones estandarizadas el coste vale decenas y exp(-coste) haria
     # underflow (toda S ~ 0, sin contraste); la mediana lo lleva a un rango util.
@@ -140,11 +147,15 @@ def similitud_sinkhorn(
 
 
 def construir_S(
-    mf: MatrizFeatures, ent_idx: np.ndarray, n_ent: int, metodo: str
+    mf: MatrizFeatures, ent_idx: np.ndarray, n_ent: int, metodo: str, progreso=None
 ) -> np.ndarray:
-    """Matriz de similitud distribucional P x P segun el metodo elegido."""
+    """Matriz de similitud distribucional P x P segun el metodo elegido.
+
+    ``progreso`` solo aplica al metodo ``sinkhorn`` (bucle costoso); ``mmd`` esta
+    vectorizado y no lo necesita.
+    """
     if metodo == "mmd":
         return similitud_mmd(mf, ent_idx, n_ent)
     if metodo == "sinkhorn":
-        return similitud_sinkhorn(mf, ent_idx, n_ent)
+        return similitud_sinkhorn(mf, ent_idx, n_ent, progreso=progreso)
     raise ValueError(f"metodo distribucional desconocido: {metodo!r}")

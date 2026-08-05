@@ -11,6 +11,18 @@ observacion (no de cada entidad):
    con nanmean/nanstd; los NaN de ratios sin definir quedan en 0 (la media
    estandarizada), separando volumen de eficiencia sin romper el ajuste.
 
+Al jugador se le añaden ademas 25 columnas `pos_*` con la fraccion de minutos
+por posicion (one-hot ponderado), salvo que se apague con
+``config.USE_POSITION_FEATURES``. Como entran depende de
+``config.POSITION_SCALING``:
+
+- ``"zscore_sqrt"`` (por defecto): pasan por el z-score con el resto y despues el
+  bloque se divide por ``sqrt(nº de posiciones)``, de forma que las 25 columnas
+  juntas pesan como UNA feature en vez de como ~25.
+- ``"zscore"``: solo el z-score, sin dividir -> el bloque pesa como ~25 features.
+- ``"cruda"``: la fraccion se queda en [0,1] fuera del z-score y del winsorizado
+  (el bloque tambien pesa como una feature, pero sin estandarizar).
+
 Modos de normalizacion:
 - ``por_liga`` (por defecto): estandariza dentro de cada (competition_id,
   season_id). Evita que las ligas dominen la comparacion, pero pierde toda
@@ -77,7 +89,22 @@ def _derivar_jugador(df: pd.DataFrame) -> pd.DataFrame:
     # Diferencias sobre valores per-90 (rendimiento - modelo).
     for name, a, b in config.PLAYER_DIFF_FEATURES:
         feats[name] = feats[a] - feats[b]
+
+    # Posicion (ver config.USE_POSITION_FEATURES). En los modos con z-score se
+    # concatena aqui, para pasar por la estandarizacion con el resto; en modo
+    # "cruda" se añade despues, ya en `construir`.
+    if config.USE_POSITION_FEATURES and config.POSITION_SCALING in _CON_ZSCORE:
+        feats = pd.concat([feats, _posiciones(df)], axis=1)
     return feats
+
+
+def _posiciones(df: pd.DataFrame) -> pd.DataFrame:
+    """Las 25 columnas `pos_*` (fraccion de minutos por posicion) del df.
+
+    Las aporta `data.cargar_jugadores`; si faltasen (un df construido a mano sin
+    esa capa) se rellenan a 0 = sin senal de posicion.
+    """
+    return df.reindex(columns=config.POSITION_FEATURES).astype(float).fillna(0.0)
 
 
 def _derivar_equipo(df: pd.DataFrame) -> pd.DataFrame:
@@ -120,6 +147,46 @@ def _zscore_global(feats: pd.DataFrame) -> pd.DataFrame:
 # Modos validos de normalizacion (los que `construir` acepta).
 NORMALIZACIONES_VALIDAS = ("por_liga", "global")
 
+# Modos validos de escalado del bloque de posicion (config.POSITION_SCALING).
+POSITION_SCALINGS_VALIDAS = ("cruda", "zscore", "zscore_sqrt")
+
+# Los que estandarizan el bloque con el resto de features (se concatena antes del
+# z-score); "cruda" es el unico que se añade despues.
+_CON_ZSCORE = ("zscore", "zscore_sqrt")
+
+
+def _bloque_posicion_crudo(df: pd.DataFrame) -> np.ndarray:
+    """Las 25 columnas `pos_*` sin tocar: fraccion de minutos en [0,1].
+
+    A proposito NO pasan por el z-score ni por el winsorizado. Cada fila suma 1
+    (one-hot "blando"), asi que dos observaciones en posiciones distintas distan
+    sqrt(2) en este bloque y aportan 2.0 a la distancia^2 — la misma aportacion
+    esperada que una unica feature z-scoreada de varianza 1. El bloque entero
+    influye por tanto como UNA feature, que es el criterio elegido; no se divide
+    por sqrt(n_posiciones) porque eso lo dejaria n_posiciones veces por debajo.
+    """
+    pos = _posiciones(df).to_numpy(dtype=float)
+    return np.nan_to_num(pos, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _reescalar_bloque_zscoreado(X: np.ndarray, feat_names: list[str]) -> None:
+    """Divide IN PLACE el bloque `pos_*` ya z-scoreado por sqrt(nº de posiciones).
+
+    Cada columna estandarizada tiene varianza 1 y aporta E[(xi-xj)^2] = 2 a la
+    distancia^2, asi que las P columnas juntas aportan 2P: la posicion pasaria a
+    pesar como ~P features y a gobernar el ranking. Dividir el bloque por sqrt(P)
+    divide su distancia^2 por P y lo deja en 2.0 — exactamente lo que aporta UNA
+    feature — sin renunciar al z-score (a diferencia del modo "cruda", que pesa
+    igual pero deja la fraccion sin estandarizar ni winsorizar).
+
+    El divisor es el tamaño del CATALOGO (`config.POSITION_FEATURES`, 25), no el
+    nº de posiciones observadas: asi el peso del bloque no depende de que
+    posiciones aparezcan en el subconjunto de datos que se cargue.
+    """
+    cols = [i for i, c in enumerate(feat_names) if c in set(config.POSITION_FEATURES)]
+    if cols:
+        X[:, cols] /= np.sqrt(len(config.POSITION_FEATURES))
+
 
 def construir(
     df: pd.DataFrame, entidad: str, normalizacion: str = "por_liga"
@@ -134,6 +201,11 @@ def construir(
         raise ValueError(
             f"normalizacion desconocida: {normalizacion!r} "
             f"(usa {NORMALIZACIONES_VALIDAS})"
+        )
+    if config.POSITION_SCALING not in POSITION_SCALINGS_VALIDAS:
+        raise ValueError(
+            f"config.POSITION_SCALING desconocido: {config.POSITION_SCALING!r} "
+            f"(usa {POSITION_SCALINGS_VALIDAS})"
         )
 
     if entidad == "jugador":
@@ -156,6 +228,26 @@ def construir(
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
     # Winsorizado: tapa z-scores extremos de per-90 en cameos de pocos minutos.
     X = np.clip(X, -config.F_CLIP_Z, config.F_CLIP_Z)
+
+    # Posicion en modo "zscore_sqrt" (el default): el bloque ya paso por el
+    # z-score y el clip con el resto; ahora se reescala para que las 25 columnas
+    # pesen como una sola feature (ver _reescalar_bloque_zscoreado).
+    if (
+        entidad == "jugador"
+        and config.USE_POSITION_FEATURES
+        and config.POSITION_SCALING == "zscore_sqrt"
+    ):
+        _reescalar_bloque_zscoreado(X, feat_names)
+
+    # Posicion en modo "cruda": se concatena DESPUES, para que no la toquen ni el
+    # z-score ni el clip y conserve su escala [0,1] (ver _bloque_posicion_crudo).
+    if (
+        entidad == "jugador"
+        and config.USE_POSITION_FEATURES
+        and config.POSITION_SCALING == "cruda"
+    ):
+        X = np.hstack([X, _bloque_posicion_crudo(df)])
+        feat_names = feat_names + list(config.POSITION_FEATURES)
 
     return MatrizFeatures(
         X=X,

@@ -114,7 +114,10 @@ class TestDerivarJugador:
         feats = features._derivar_jugador(df)
         assert feats["np_goals_minus_npxg"][0] == pytest.approx(2.0 - 0.5)
 
-    def test_estan_todas_las_features_esperadas(self) -> None:
+    def test_estan_todas_las_features_esperadas(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "USE_POSITION_FEATURES", False)
         feats = features._derivar_jugador(_df_jugador([{}]))
         esperadas = (
             set(config.PLAYER_COUNT_FEATURES)
@@ -122,6 +125,13 @@ class TestDerivarJugador:
             | {n for n, _, _ in config.PLAYER_DIFF_FEATURES}
         )
         assert set(feats.columns) == esperadas
+
+    def test_con_el_default_incluye_el_bloque_de_posicion(self) -> None:
+        """En los modos con z-score (el default lo es) la posicion se concatena
+        aqui, para estandarizarse con el resto; en modo `cruda` se añade despues.
+        """
+        feats = features._derivar_jugador(_df_jugador([{}]))
+        assert set(config.POSITION_FEATURES) <= set(feats.columns)
 
     def test_los_denominadores_auxiliares_no_se_cuelan_como_feature(self) -> None:
         feats = features._derivar_jugador(_df_jugador([{}]))
@@ -304,6 +314,172 @@ class TestConstruir:
 
     def test_las_dos_normalizaciones_estan_declaradas(self) -> None:
         assert set(features.NORMALIZACIONES_VALIDAS) == {"por_liga", "global"}
+
+
+class TestPosicionOpcional:
+    """La posicion (one-hot ponderado) forma parte del vector del jugador por
+    defecto; `config.USE_POSITION_FEATURES` la apaga y nunca afecta al equipo.
+    """
+
+    def test_encendida_por_defecto(self) -> None:
+        mf = features.construir(_df_jugador([{"entity_id": 1}, {"entity_id": 2}]), "jugador")
+        assert set(config.POSITION_FEATURES) <= set(mf.feat_names)
+
+    def test_apagada_no_añade_columnas(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(config, "USE_POSITION_FEATURES", False)
+        mf = features.construir(_df_jugador([{"entity_id": 1}, {"entity_id": 2}]), "jugador")
+        assert not any(c.startswith("pos_") for c in mf.feat_names)
+
+    def test_hay_25_slugs_canonicos_declarados(self) -> None:
+        assert len(config.POSITION_FEATURES) == 25
+        assert config.POSITION_FEATURES[0] == "pos_goalkeeper"
+
+    def test_encendida_añade_las_25_columnas(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(config, "USE_POSITION_FEATURES", True)
+        mf = features.construir(_df_jugador([{"entity_id": 1}, {"entity_id": 2}]), "jugador")
+        assert set(config.POSITION_FEATURES) <= set(mf.feat_names)
+        assert mf.X.shape[1] == len(mf.feat_names)
+
+    def test_el_equipo_nunca_recibe_posicion(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """El equipo no tiene posicion: el flag no debe tocar su vector."""
+        monkeypatch.setattr(config, "USE_POSITION_FEATURES", True)
+        mf = features.construir(_df_equipo([{"entity_id": 1}, {"entity_id": 2}]), "equipo")
+        assert not any(c.startswith("pos_") for c in mf.feat_names)
+
+    def test_columnas_de_posicion_ausentes_se_rellenan_a_cero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Un df sin la capa `pos_*` (construido a mano) no debe romper: 0 = sin
+        senal de posicion, no NaN.
+        """
+        monkeypatch.setattr(config, "USE_POSITION_FEATURES", True)
+        mf = features.construir(_df_jugador([{"entity_id": 1}, {"entity_id": 2}]), "jugador")
+        assert np.isfinite(mf.X).all()
+
+    def test_escalado_desconocido_falla_pronto(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "POSITION_SCALING", "raiz_cuadrada")
+        with pytest.raises(ValueError, match="POSITION_SCALING"):
+            features.construir(_df_jugador([{"entity_id": 1}]), "jugador")
+
+
+class TestPosicionCruda:
+    """Modo alternativo: la fraccion de minutos entra en [0,1], fuera del
+    z-score, para que el BLOQUE entero pese como una feature (no como 25, ni como
+    1/25), pero sin estandarizar: `POSITION_SCALING = "cruda"`.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _modo_crudo(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(config, "USE_POSITION_FEATURES", True)
+        monkeypatch.setattr(config, "POSITION_SCALING", "cruda")
+
+    def test_conserva_la_fraccion_sin_estandarizar(self) -> None:
+        """Con z-score estas dos filas darian [1, -1]; crudas quedan [1, 0]."""
+        df = _df_jugador([
+            {"entity_id": 1, "pos_right_back": 1.0},
+            {"entity_id": 2, "pos_center_forward": 1.0},
+        ])
+        mf = features.construir(df, "jugador")
+        i = mf.feat_names.index("pos_right_back")
+        assert mf.X[:, i].tolist() == [1.0, 0.0]
+
+    def test_reparto_de_minutos_entre_dos_posiciones(self) -> None:
+        """Un jugador que cambia de posicion conserva sus fracciones tal cual."""
+        df = _df_jugador([
+            {"entity_id": 1, "pos_right_back": 0.75, "pos_right_wing": 0.25},
+            {"entity_id": 2, "pos_center_forward": 1.0},
+        ])
+        mf = features.construir(df, "jugador")
+        rb = mf.feat_names.index("pos_right_back")
+        rw = mf.feat_names.index("pos_right_wing")
+        assert mf.X[0, rb] == pytest.approx(0.75)
+        assert mf.X[0, rw] == pytest.approx(0.25)
+
+    def test_el_bloque_pesa_como_una_sola_feature(self) -> None:
+        """El criterio del escalado, comprobado sobre la distancia^2.
+
+        Una feature z-scoreada de varianza 1 aporta 2.0 a la distancia^2 entre
+        dos observaciones; el bloque de posicion, con dos one-hot distintos,
+        tiene que aportar lo mismo. Si se dividiese por sqrt(n_posiciones)
+        aportaria 25 veces menos.
+        """
+        df = _df_jugador([
+            {"entity_id": 1, "pos_right_back": 1.0},
+            {"entity_id": 2, "pos_center_forward": 1.0},
+        ])
+        mf = features.construir(df, "jugador")
+        cols = [mf.feat_names.index(c) for c in config.POSITION_FEATURES]
+        bloque = mf.X[:, cols]
+        d2_bloque = float(np.sum((bloque[0] - bloque[1]) ** 2))
+        assert d2_bloque == pytest.approx(2.0)
+
+    def test_no_la_toca_el_winsorizado(self) -> None:
+        """Al ir fuera del clip, el bloque nunca sale de [0,1]."""
+        df = _df_jugador([
+            {"entity_id": i, "pos_goalkeeper": 1.0} for i in range(1, 6)
+        ] + [{"entity_id": 6, "pos_right_back": 1.0}])
+        mf = features.construir(df, "jugador")
+        cols = [mf.feat_names.index(c) for c in config.POSITION_FEATURES]
+        bloque = mf.X[:, cols]
+        assert bloque.min() >= 0.0 and bloque.max() <= 1.0
+
+    def test_no_altera_las_demas_features(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Encender la posicion en modo crudo solo AÑADE columnas: las que ya
+        estaban se estandarizan igual que sin el flag (no entran en su z-score).
+        """
+        filas = [
+            {"entity_id": 1, "shots": 3.0, "pos_right_back": 1.0},
+            {"entity_id": 2, "shots": 1.0, "pos_center_forward": 1.0},
+        ]
+        monkeypatch.setattr(config, "USE_POSITION_FEATURES", False)
+        sin_pos = features.construir(_df_jugador(filas), "jugador")
+        monkeypatch.setattr(config, "USE_POSITION_FEATURES", True)
+        con_pos = features.construir(_df_jugador(filas), "jugador")
+        i = sin_pos.feat_names.index("shots")
+        j = con_pos.feat_names.index("shots")
+        assert con_pos.X[:, j] == pytest.approx(sin_pos.X[:, i])
+
+
+class TestPosicionZscore:
+    """Modo alternativo: las 25 columnas pasan por el z-score sin dividir, con lo
+    que el bloque acaba pesando como ~25 features. El default (`zscore_sqrt`)
+    parte de este y lo reescala.
+    """
+
+    def test_el_modo_por_defecto_es_el_reescalado(self) -> None:
+        assert config.POSITION_SCALING == "zscore_sqrt"
+
+    def test_estandariza_la_fraccion(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Aqui si: dos filas one-hot opuestas dan z = [1, -1] en cada columna."""
+        monkeypatch.setattr(config, "USE_POSITION_FEATURES", True)
+        monkeypatch.setattr(config, "POSITION_SCALING", "zscore")
+        df = _df_jugador([
+            {"entity_id": 1, "pos_right_back": 1.0},
+            {"entity_id": 2, "pos_center_forward": 1.0},
+        ])
+        mf = features.construir(df, "jugador")
+        i = mf.feat_names.index("pos_right_back")
+        assert mf.X[:, i].tolist() == [1.0, -1.0]
+
+    def test_el_bloque_pesa_mucho_mas_que_una_feature(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Contraste explicito con `cruda`: aqui el bloque aporta 2 por cada
+        columna con senal, no 2 en total.
+        """
+        monkeypatch.setattr(config, "USE_POSITION_FEATURES", True)
+        monkeypatch.setattr(config, "POSITION_SCALING", "zscore")
+        df = _df_jugador([
+            {"entity_id": 1, "pos_right_back": 1.0},
+            {"entity_id": 2, "pos_center_forward": 1.0},
+        ])
+        mf = features.construir(df, "jugador")
+        cols = [mf.feat_names.index(c) for c in config.POSITION_FEATURES]
+        bloque = mf.X[:, cols]
+        d2_bloque = float(np.sum((bloque[0] - bloque[1]) ** 2))
+        assert d2_bloque == pytest.approx(8.0)  # 2 columnas con senal x 4
 
 
 class TestConDatosReales:

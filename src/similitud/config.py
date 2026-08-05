@@ -9,9 +9,59 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.extraccion.config import POSITIONS_25, position_slug
+
 # --- Rutas por defecto -------------------------------------------------------
 DEFAULT_DB_PATH = Path("outputs/db/scouting.db")
 DEFAULT_MODEL_DIR = Path("outputs/modelo")
+
+# --- Posicion como feature del jugador (one-hot ponderado por % de minutos) ---
+# Catalogo canonico de las 25 posiciones StatsBomb -> slugs de columna, en orden
+# estable de position_id (1..25). Es la unica fuente de verdad del catalogo
+# (src.extraccion.config), para que la dimension y el orden del vector no
+# dependan de que posiciones aparezcan en un subconjunto de datos.
+POSITION_FEATURES: list[str] = [position_slug(n) for n in POSITIONS_25.values()]
+
+# Interruptor: cuando esta activo, la capa de features añade al vector de cada
+# jugador-partido las 25 columnas `pos_*` con la FRACCION de minutos disputada en
+# cada posicion (one-hot "blando": suma 1 salvo redondeo; one-hot puro si no
+# cambia de posicion). Solo aplica a 'jugador' (el equipo no tiene posicion).
+#
+# ENCENDIDO por defecto a partir del barrido de `outputs/evaluacion/barrido`:
+# frente al vector sin posicion gana tambien en las señales NO circulares (F5
+# jugador: auto-similitud MRR 0.192 -> 0.281, estabilidad RBO@10 0.377 -> 0.452,
+# medido con POSITION_SCALING = "zscore"). Forma parte del modelo base, asi que
+# el barrido de hiperparametros ya NO lo mueve: para probar el vector sin
+# posicion se pone aqui a False. [[modelo-similitud-posicion]]
+USE_POSITION_FEATURES = True
+
+# Como entra ese bloque en el vector. La unidad de referencia es lo que aporta
+# cada feature a la distancia^2 entre dos observaciones, que es lo que consumen
+# MMD/Sinkhorn (F5) y el coordinate descent (F2): una feature z-scoreada
+# (varianza 1) aporta E[(xi-xj)^2] = 2.
+#
+# - "zscore_sqrt" (por defecto): las 25 columnas se estandarizan y winsorizan
+#   como el resto y DESPUES el bloque entero se divide por sqrt(25). El z-score
+#   se conserva (cada columna sigue centrada y con varianza 1 antes de dividir),
+#   pero el bloque aporta 2*25/25 = 2.0 a la distancia^2, o sea pesa como UNA
+#   feature: la posicion informa sin gobernar el ranking.
+# - "zscore": el mismo z-score SIN dividir, con lo que el bloque pesa como ~25
+#   features y la posicion domina la distancia. Es el modo con el que se midio el
+#   barrido (ganaba a no usar posicion tambien en las señales no circulares),
+#   pero conviene saber lo que implica: parte de esa ventaja es que la posicion
+#   es una etiqueta casi constante entre las dos mitades de la temporada, y
+#   ademas una posicion rara (p. ej. 'Center Midfield', 10 apariciones en toda la
+#   BD) genera z-scores enormes recortados a F_CLIP_Z.
+# - "cruda": la fraccion entra TAL CUAL, en [0,1], FUERA del z-score y del
+#   winsorizado. Dos filas one-hot distintas distan sqrt(2) en el bloque, o sea
+#   aportan 2.0 a la distancia^2: tambien una feature, pero sin estandarizar (y
+#   aqui SI sobraria dividir por sqrt(P): dejaria el bloque P veces por debajo de
+#   una feature y la posicion seria casi invisible).
+#
+# Sea cual sea el modo, la pureza posicional (Fase 0) y el k-NN por posicion
+# (Fase 5) usan la posicion como ETIQUETA: con el bloque encendido son
+# circulares y no valen como evidencia.
+POSITION_SCALING = "zscore_sqrt"
 
 # --- Conteos crudos que se convierten a per-90 (jugador) ---------------------
 # Se estandarizan como VOLUMEN (una senal distinta de la EFICIENCIA/ratio).

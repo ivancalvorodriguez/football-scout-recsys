@@ -6,10 +6,11 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 from src.extraccion import database as db
-from src.similitud import data
+from src.similitud import config, data
 from src.similitud.data import LEAGUE_KEY
 
 
@@ -53,6 +54,26 @@ class TestCargarJugadores:
         df = data.cargar_jugadores(resumen_bd["db_path"])
         esperado = df["competition_id"].astype(str) + "-" + df["season_id"].astype(str)
         assert (df[LEAGUE_KEY] == esperado).all()
+
+
+class TestFraccionPosicion:
+    """`cargar_jugadores` adjunta las 25 columnas `pos_*` (fraccion de minutos por
+    posicion), material para la feature opcional de posicion del modelo.
+    """
+
+    def test_adjunta_las_columnas_de_posicion(self, resumen_bd: dict[str, Any]) -> None:
+        df = data.cargar_jugadores(resumen_bd["db_path"])
+        assert set(config.POSITION_FEATURES) <= set(df.columns)
+
+    def test_la_fraccion_suma_uno_por_observacion(self, resumen_bd: dict[str, Any]) -> None:
+        """Cada jugador-partido reparte el 100% de sus minutos entre posiciones."""
+        df = data.cargar_jugadores(resumen_bd["db_path"])
+        suma = df[config.POSITION_FEATURES].sum(axis=1).to_numpy()
+        assert np.allclose(suma, 1.0)
+
+    def test_no_deja_nan_en_las_columnas_de_posicion(self, resumen_bd: dict[str, Any]) -> None:
+        df = data.cargar_jugadores(resumen_bd["db_path"])
+        assert not df[config.POSITION_FEATURES].isna().any().any()
 
 
 class TestCargarEquipos:
