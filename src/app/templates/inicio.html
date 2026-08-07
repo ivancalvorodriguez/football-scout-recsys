@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block contenido %}
+  <section class="panel">
+    <h1>¿A quién se parece?</h1>
+    <p class="ayuda">
+      Elige si buscas <strong>jugadores</strong> o <strong>equipos</strong>, escribe un
+      nombre de la base de datos y el modelo devuelve los más similares por perfil.
+    </p>
+    {% include "_buscador.html" %}
+  </section>
+
+  <section class="panel panel-secundario">
+    <h2>Modelos cargados</h2>
+    <p class="ayuda">
+      Cada combinación es un artefacto entrenado distinto: las dos formulaciones SLIM
+      se comparan entre sí, igual que las dos normalizaciones.
+    </p>
+    <ul class="lista-modelos">
+      {% for opcion in opciones %}
+        <li>
+          <span class="etiqueta-modelo">F{{ opcion.formulacion }}</span>
+          {{ etiqueta_formulacion[opcion.formulacion] }}
+          <span class="apunte">· {{ etiqueta_normalizacion[opcion.normalizacion] }}</span>
+        </li>
+      {% else %}
+        <li class="apunte">No hay modelos de {{ etiqueta_plural[entidad] }}.</li>
+      {% endfor %}
+    </ul>
+  </section>
+{% endblock %}

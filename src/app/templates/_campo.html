@@ -1,0 +1,100 @@
+{#
+  Reparto de minutos por posición sobre un campo de fútbol.
+
+  Espera `marcas` (tuplas `contexto.MarcaCampo`) y, opcionalmente, `titulo`,
+  `nombre_a` y `nombre_b`. En cada posición se dibuja UN círculo, siempre del
+  mismo tamaño: el círculo dice dónde se juega y los porcentajes escritos dentro
+  dicen cuánto. Con `nombre_b` la figura compara a dos jugadores sobre la UNIÓN
+  de sus posiciones, y dentro de cada círculo van los dos porcentajes, uno por
+  color. Una posición en la que uno no ha jugado sale con su 0 %, que es justo la
+  diferencia que hay que leer.
+
+  Al pasar el ratón por una marca se explica de qué posición es y a quién
+  pertenece cada porcentaje: en el círculo solo caben las cifras, y sin eso hay
+  que ir a la leyenda y a la lista de abajo para saber qué se está mirando. Va en
+  DOS capas:
+
+  - el `<title>` del grupo (`contexto.MarcaCampo.rotulo`), que es el tooltip
+    nativo del navegador y funciona sin JavaScript;
+  - `campo.js`, que lo sustituye por el globo `.campo-globo` de aquí abajo —con
+    el color de cada jugador— y pasa el texto del `<title>` a `aria-label` para
+    no perder el nombre accesible ni duplicar tooltips.
+
+  De ahí los `data-*` de cada grupo: son los mismos datos que ya se pintan, en
+  crudo, para que el globo no tenga que leerlos del SVG.
+
+  El campo se dibuja en vertical (portería propia abajo, ataque hacia arriba),
+  que es como se leen las alineaciones; NO es el sistema 120x80 de StatsBomb,
+  aquí solo hay píxeles (ver `src/app/posiciones.py`).
+#}
+{% if marcas %}
+  {% set comparando = nombre_b is defined and nombre_b %}
+  <figure class="campo-juego"
+          data-nombre-a="{{ nombre_a | default('', true) }}"
+          {% if comparando %}data-nombre-b="{{ nombre_b }}"{% endif %}>
+    {% if titulo %}<figcaption class="campo-titulo">{{ titulo }}</figcaption>{% endif %}
+    <svg viewBox="-6 -6 112 112" role="img"
+         aria-label="Reparto de minutos por posición sobre el campo">
+      <g class="campo-lineas">
+        <rect x="0" y="0" width="100" height="100" rx="1"></rect>
+        <line x1="0" y1="50" x2="100" y2="50"></line>
+        <circle cx="50" cy="50" r="12"></circle>
+        {# Áreas grandes y pequeñas de las dos porterías. #}
+        <rect x="22" y="0" width="56" height="15"></rect>
+        <rect x="37" y="0" width="26" height="6"></rect>
+        <rect x="22" y="85" width="56" height="15"></rect>
+        <rect x="37" y="94" width="26" height="6"></rect>
+      </g>
+
+      <g class="campo-marcas">
+        {% for m in marcas %}
+          {# El <title> cuelga del GRUPO, no del círculo: así el tooltip sale
+             también con el ratón sobre los porcentajes, que tapan el centro de
+             la marca (que es justo donde se apunta). `tabindex` para llegar a
+             las marcas con el teclado, ya que el globo también sale al enfocar. #}
+          <g class="marca-grupo" tabindex="0"
+             data-posicion="{{ m.posicion.etiqueta }}"
+             data-pct-a="{{ m.porcentaje }}"
+             {% if comparando %}data-pct-b="{{ m.porcentaje_otro }}"{% endif %}>
+            <title>{{ m.rotulo(nombre_a | default('', true),
+                               nombre_b | default('', true)) }}</title>
+            <circle class="marca" cx="{{ m.posicion.x }}" cy="{{ m.posicion.y }}"
+                    r="{{ radio_marca }}"></circle>
+            {% if comparando %}
+              <text class="marca-pct marca-pct-a" x="{{ m.posicion.x }}"
+                    y="{{ m.posicion.y - 0.2 }}" text-anchor="middle">{{ m.porcentaje }}</text>
+              <text class="marca-pct marca-pct-b" x="{{ m.posicion.x }}"
+                    y="{{ m.posicion.y + 2.9 }}" text-anchor="middle">{{ m.porcentaje_otro }}</text>
+            {% else %}
+              <text class="marca-pct marca-pct-a" x="{{ m.posicion.x }}"
+                    y="{{ m.posicion.y + 1.0 }}" text-anchor="middle">{{ m.porcentaje }}</text>
+            {% endif %}
+          </g>
+        {% endfor %}
+      </g>
+    </svg>
+
+    {# Lo rellena y lo coloca `campo.js`; sin JavaScript se queda oculto y el
+       tooltip lo da el <title> de cada marca. #}
+    <div class="campo-globo" hidden></div>
+
+    {% if comparando %}
+      <ul class="radar-leyenda">
+        <li class="marca-leyenda-a">{{ nombre_a }}</li>
+        <li class="marca-leyenda-b">{{ nombre_b }}</li>
+      </ul>
+    {% endif %}
+
+    <ul class="lista-posiciones">
+      {% for m in marcas[:(n_posiciones or 5)] %}
+        <li>
+          <span class="posicion-nombre">{{ m.posicion.etiqueta }}</span>
+          <span class="z marca-pct-a">{{ m.porcentaje }}</span>
+          {% if comparando %}
+            <span class="z marca-pct-b">{{ m.porcentaje_otro }}</span>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  </figure>
+{% endif %}

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{% block titulo %}Sin modelos · Scouting por similitud{% endblock %}
+
+{% block contenido %}
+  <section class="panel">
+    <h1>Todavía no hay modelos que servir</h1>
+    <p class="aviso">
+      {{ mensaje if mensaje else 'No se ha encontrado ningún artefacto de modelo en ' ~ model_dir ~ '.' }}
+    </p>
+    <p class="ayuda">La app no entrena nada: consume lo que deja el pipeline. Desde la raíz del repo:</p>
+    <pre class="comandos"><code>python -m src.extraccion.extract      # 1) eventos StatsBomb -> outputs/db/scouting.db
+python -m src.similitud.build         # 2) modelos -> outputs/modelo/</code></pre>
+    <p class="ayuda">
+      Con los artefactos en <code>{{ model_dir }}</code>, recarga esta página: el
+      catálogo los detecta sin reiniciar el servidor.
+    </p>
+  </section>
+{% endblock %}

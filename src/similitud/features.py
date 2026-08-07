@@ -188,6 +188,49 @@ def _reescalar_bloque_zscoreado(X: np.ndarray, feat_names: list[str]) -> None:
         X[:, cols] /= np.sqrt(len(config.POSITION_FEATURES))
 
 
+def derivar(df: pd.DataFrame, entidad: str) -> pd.DataFrame:
+    """Features derivadas de cada observacion SIN estandarizar.
+
+    Son los pasos 1-3 de `construir` (per-90 o conteo por partido, ratios y
+    diferencias) parando justo antes del z-score: valores en sus unidades reales
+    (pases por 90', % de acierto, xG...). El modelo NO usa esto — se ajusta con
+    la salida de `construir`; existe para poder MOSTRAR una metrica en una
+    interfaz, donde un z-score no dice nada a un ojeador.
+
+    Devuelve las columnas en el mismo orden que `construir().feat_names`, sea
+    cual sea `config.POSITION_SCALING`; hay un test que lo fija, porque de esa
+    correspondencia depende que un valor crudo se pueda emparejar con la columna
+    del artefacto que le toca.
+    """
+    if entidad == "jugador":
+        feats = _derivar_jugador(df)
+        # En los modos con z-score, `_derivar_jugador` ya concatena el bloque de
+        # posicion; en "cruda" lo hace `construir` despues de estandarizar. Aqui
+        # no hay z-score que respetar, asi que se añade en el mismo sitio: al
+        # final, que es donde acaba en los dos casos.
+        if config.USE_POSITION_FEATURES and config.POSITION_SCALING == "cruda":
+            feats = pd.concat([feats, _posiciones(df)], axis=1)
+        return feats
+    if entidad == "equipo":
+        return _derivar_equipo(df)
+    raise ValueError(f"entidad desconocida: {entidad!r}")
+
+
+def masa(df: pd.DataFrame, entidad: str) -> np.ndarray:
+    """Peso de cada observacion al agregar por entidad.
+
+    Minutos/90 en el jugador (un cameo de 5' no puede pesar como un partido
+    entero) y masa uniforme en el equipo, que juega el partido completo. Es el
+    mismo criterio que usa `construir`, expuesto aparte para que quien agregue
+    los valores de `derivar` no tenga que reimplementarlo.
+    """
+    if entidad == "jugador":
+        return (df["minutes_played"].astype(float) / 90.0).to_numpy()
+    if entidad == "equipo":
+        return np.ones(len(df), dtype=float)
+    raise ValueError(f"entidad desconocida: {entidad!r}")
+
+
 def construir(
     df: pd.DataFrame, entidad: str, normalizacion: str = "por_liga"
 ) -> MatrizFeatures:
@@ -210,12 +253,11 @@ def construir(
 
     if entidad == "jugador":
         feats = _derivar_jugador(df)
-        weight = (df["minutes_played"].astype(float) / 90.0).to_numpy()
     elif entidad == "equipo":
         feats = _derivar_equipo(df)
-        weight = np.ones(len(df), dtype=float)  # masa uniforme (partido completo)
     else:
         raise ValueError(f"entidad desconocida: {entidad!r}")
+    weight = masa(df, entidad)
 
     feat_names = list(feats.columns)
     league = df[LEAGUE_KEY]

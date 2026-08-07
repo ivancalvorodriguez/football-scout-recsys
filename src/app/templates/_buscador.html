@@ -1,0 +1,59 @@
+{#
+  Formulario de búsqueda, compartido por inicio y resultados.
+
+  El campo oculto `id` es la identidad real de la referencia: lo rellena el
+  autocompletado al elegir una sugerencia (dos entidades pueden llamarse igual).
+  Si el usuario escribe y envía sin elegir, va vacío y el servidor resuelve por
+  nombre.
+#}
+<form class="buscador" action="{{ url_for('web.similares') }}" method="get"
+      data-api-sugerencias="{{ url_for('web.api_sugerencias') }}">
+  <div class="campo campo-entidad">
+    <label for="entidad">Buscar</label>
+    <select id="entidad" name="entidad" data-recarga="{{ url_for('web.inicio') }}">
+      {% for e in entidades %}
+        <option value="{{ e }}" {{ 'selected' if e == entidad }}>
+          {{ etiqueta_entidad[e] }}
+        </option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="campo campo-nombre">
+    <label for="nombre">Nombre</label>
+    <input type="text" id="nombre" name="nombre" autocomplete="off"
+           value="{{ consulta if consulta is defined else (rec.referencia.nombre if rec is defined else '') }}"
+           placeholder="{{ 'Ej.: Messi' if entidad == 'jugador' else 'Ej.: Barcelona' }}">
+    <input type="hidden" id="id-entidad" name="id" value="">
+    <ul class="sugerencias" id="sugerencias" hidden></ul>
+  </div>
+
+  <div class="campo campo-modelo">
+    <label for="formulacion">Formulación</label>
+    <select id="formulacion" name="formulacion">
+      {% for f in opciones | map(attribute='formulacion') | unique | sort %}
+        <option value="{{ f }}" {{ 'selected' if clave and f == clave.formulacion }}>
+          F{{ f }}
+        </option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="campo campo-modelo">
+    <label for="normalizacion">Normalización</label>
+    <select id="normalizacion" name="normalizacion">
+      {% for n in opciones | map(attribute='normalizacion') | unique | sort %}
+        <option value="{{ n }}" {{ 'selected' if clave and n == clave.normalizacion }}>
+          {{ etiqueta_normalizacion[n] }}
+        </option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="campo campo-k">
+    <label for="k">Top</label>
+    <input type="number" id="k" name="k" min="1" max="50" value="{{ k }}">
+  </div>
+
+  <button type="submit" class="boton">Buscar similares</button>
+</form>

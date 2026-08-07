@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% from "_enlaces.html" import enlace_ficha, url_ficha %}
+{% from "_contexto.html" import contexto_entidad %}
+
+{% block titulo %}{{ rec.referencia.nombre }} · Scouting por similitud{% endblock %}
+
+{% block contenido %}
+  <section class="panel">
+    {% include "_buscador.html" %}
+  </section>
+
+  <section class="panel referencia">
+    <p class="apunte">Referencia</p>
+    <h1>{{ enlace_ficha(entidad, rec.referencia, clave, 'enlace-referencia') }}</h1>
+    <p class="meta-referencia">
+      {{ etiqueta_entidad[entidad] }} ·
+      {{ contexto_entidad(entidad, rec.referencia) }} ·
+      id {{ rec.referencia.id }}
+    </p>
+
+    {% if not radar_referencia.vacio %}
+      {% with radar = radar_referencia, titulo = 'Perfil por fases', amplio = true %}
+        {% include "_radar.html" %}
+      {% endwith %}
+    {% endif %}
+
+    {% if rec.rasgos %}
+      <p class="apunte">
+        Donde más se separa de {{ referencia_z }}{% if hay_crudos %}{% endif %}:
+      </p>
+      <ul class="rasgos">
+        {% for r in rec.rasgos %}
+          <li>
+            <span class="rasgo-nombre">{{ r.etiqueta }}</span>
+            {% if hay_crudos %}
+              <span class="z valor-real">{{ r.texto }}</span>
+              {% if r.unidad %}<span class="unidad">{{ r.unidad }}</span>{% endif %}
+            {% endif %}
+            <span class="z {{ 'z-secundario' if hay_crudos }} {{ 'z-alto' if r.valor >= 0 else 'z-bajo' }}"
+                  title="Desviaciones típicas respecto a {{ referencia_z }}">{{ '%+.2f' % r.valor }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    <p class="apunte modelo-usado">
+      Modelo: {{ etiqueta_formulacion[clave.formulacion] }} ·
+      {{ etiqueta_normalizacion[clave.normalizacion] }}
+    </p>
+  </section>
+
+  <section class="panel">
+    <h2>Top {{ rec.candidatos | length }} más similares</h2>
+    {% if rec.incompleto %}
+      <p class="aviso">
+        El modelo solo encuentra {{ rec.candidatos | length }} de los {{ rec.k_pedido }}
+        pedidos: en la Formulación 2 la matriz de similitud es dispersa y una entidad
+        poco conectada no tiene más vecinas con relación aprendida. Se prefiere
+        devolver menos que rellenar con entidades arbitrarias.
+      </p>
+    {% endif %}
+
+    {% if rec.candidatos %}
+      <ol class="candidatos">
+        {% for c in rec.candidatos %}
+          {% set comparativa = comparativas[c.entidad.indice] %}
+          <li class="candidato">
+            <div class="candidato-cabecera">
+              <span class="rango">{{ c.rango }}</span>
+              <a class="candidato-nombre" href="{{ url_ficha(entidad, c.entidad.id, clave) }}"
+                 title="Ver la ficha de {{ c.entidad.nombre }}">
+                {{ c.entidad.nombre }}
+              </a>
+              <span class="score" title="Puntuación de la matriz S del modelo">
+                {{ '%+.4f' % c.score }}
+              </span>
+            </div>
+            <p class="apunte ligas">{{ contexto_entidad(entidad, c.entidad) }}</p>
+
+            {# Sin campo de posiciones (los equipos no lo tienen) el radar se
+               queda solo: se le da todo el ancho y se centra. #}
+            <div class="explicacion">
+              {% if not comparativa.radar.vacio %}
+                {% with radar = comparativa.radar, titulo = 'Perfil por fases',
+                        amplio = not comparativa.marcas %}
+                  {% include "_radar.html" %}
+                {% endwith %}
+              {% endif %}
+
+              {% if comparativa.marcas %}
+                {% with marcas = comparativa.marcas,
+                        titulo = 'Minutos por posición',
+                        nombre_a = rec.referencia.nombre,
+                        nombre_b = c.entidad.nombre %}
+                  {% include "_campo.html" %}
+                {% endwith %}
+              {% endif %}
+            </div>
+
+            {% if c.coincidencias %}
+              <table class="coincidencias">
+                <thead>
+                  <tr>
+                    <th>Coinciden en</th>
+                    <th>{{ rec.referencia.nombre }}</th>
+                    <th>{{ c.entidad.nombre }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for co in c.coincidencias %}
+                    <tr>
+                      <td>
+                        {{ co.etiqueta }}
+                        {%- if hay_crudos and co.unidad %}
+                          <span class="unidad">{{ co.unidad }}</span>
+                        {%- endif %}
+                      </td>
+                      <td class="z valor-real">
+                        {% if hay_crudos %}{{ co.texto_referencia }}{% endif %}
+                        <span class="{{ 'z-secundario' if hay_crudos }} {{ 'z-alto' if co.referencia >= 0 else 'z-bajo' }}"
+                              title="Desviaciones típicas respecto a {{ referencia_z }}">{{ '%+.2f' % co.referencia }}</span>
+                      </td>
+                      <td class="z valor-real">
+                        {% if hay_crudos %}{{ co.texto_candidato }}{% endif %}
+                        <span class="{{ 'z-secundario' if hay_crudos }} {{ 'z-alto' if co.candidato >= 0 else 'z-bajo' }}"
+                              title="Desviaciones típicas respecto a {{ referencia_z }}">{{ '%+.2f' % co.candidato }}</span>
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ol>
+      <p class="apunte">
+        {% if hay_crudos %}
+          La cifra grande es el valor real de la métrica {{ unidad }} (media
+          ponderada por minutos); el número pequeño, su z-score frente a
+          {{ referencia_z }}, que es lo que decide qué métricas aparecen aquí.
+        {% else %}
+          Los valores son z-scores frente a {{ referencia_z }}: sin base de datos
+          no se pueden reconstruir los valores reales.
+        {% endif %}
+        Es un resumen para interpretar: no es la entrada del modelo. El radar de
+        fases agrupa esos z-scores y los expresa en percentiles.
+      </p>
+    {% else %}
+      <p class="aviso">
+        El modelo no ha aprendido ninguna relación para esta entidad, así que no hay
+        recomendaciones que mostrar.
+      </p>
+    {% endif %}
+  </section>
+{% endblock %}

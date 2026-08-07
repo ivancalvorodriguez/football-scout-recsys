@@ -1,0 +1,56 @@
+{#
+  Tabla de métricas destacadas o flojas de una entidad.
+
+  La cifra grande es el VALOR REAL de la métrica en sus unidades (pases por 90',
+  % de acierto, xG), que es lo que se lee de un vistazo. El z-score va detrás y
+  en pequeño porque es lo que justifica que esa métrica esté en la lista: sin él,
+  «1,20 despejes» no dice si es mucho o poco.
+
+  `referencia_z` (contra qué se mide ese z) viene del contexto de la página: el
+  macro se importa `with context` porque depende de la normalización del modelo,
+  no del macro. Sin él, el rótulo diría «su liga» también en el modelo global.
+
+  `con_valor` viene a false cuando no hay base de datos: los valores reales se
+  reconstruyen desde ella, así que en ese caso se enseña solo el z-score en vez de
+  una columna entera de guiones.
+
+  Las métricas en las que subir es empeorar se marcan con una flecha, para que un
+  valor alto no se lea como algo bueno.
+#}
+
+{% macro tabla_rasgos(rasgos, con_valor=true) %}
+  {% if rasgos %}
+    <table class="coincidencias tabla-rasgos">
+      <thead>
+        <tr>
+          <th>Métrica</th>
+          <th>Fase</th>
+          {% if con_valor %}<th>Valor</th>{% endif %}
+          <th title="Desviaciones típicas respecto a {{ referencia_z }}">z</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rasgos %}
+          <tr>
+            <td>
+              {{ r.etiqueta }}
+              {%- if r.invertida %}
+                <span class="marca-invertida" title="En esta métrica, menos es mejor">↓</span>
+              {%- endif %}
+              {%- if con_valor and r.unidad %}
+                <span class="unidad">{{ r.unidad }}</span>
+              {%- endif %}
+            </td>
+            <td class="apunte">{{ r.fase or '—' }}</td>
+            {% if con_valor %}<td class="z valor-real">{{ r.texto }}</td>{% endif %}
+            <td class="z {{ 'z-secundario' if con_valor }} {{ 'z-alto' if r.valor >= 0 else 'z-bajo' }}">
+              {{ '%+.2f' % r.valor }}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="apunte">Sin métricas suficientes para calcularlo.</p>
+  {% endif %}
+{% endmacro %}

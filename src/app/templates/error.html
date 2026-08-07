@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block titulo %}Error · Scouting por similitud{% endblock %}
+
+{% block contenido %}
+  <section class="panel">
+    <h1>No se ha podido completar la búsqueda</h1>
+    <p class="aviso">{{ mensaje }}</p>
+    <p><a class="boton" href="{{ url_for('web.inicio') }}">Volver al buscador</a></p>
+  </section>
+{% endblock %}

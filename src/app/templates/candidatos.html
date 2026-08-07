@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% from "_enlaces.html" import url_ficha %}
+{% from "_contexto.html" import contexto_entidad %}
+
+{% block titulo %}«{{ consulta }}» · Scouting por similitud{% endblock %}
+
+{% block contenido %}
+  <section class="panel">
+    {% include "_buscador.html" %}
+  </section>
+
+  <section class="panel">
+    {% if candidatos %}
+      <h1>Varias coincidencias con «{{ consulta }}»</h1>
+      <p class="ayuda">
+        Elige a quién te referías. Se prefiere preguntar antes que decidir en silencio:
+        recomendar el {{ etiqueta_entidad[entidad] | lower }} equivocado pasa
+        desapercibido.
+      </p>
+      <ul class="lista-candidatos">
+        {% for c in candidatos %}
+          <li>
+            <a href="{{ url_for('web.similares', entidad=entidad, id=c.id,
+                                formulacion=clave.formulacion if clave else none,
+                                normalizacion=clave.normalizacion if clave else none,
+                                k=k) }}">
+              {{ c.nombre }}
+            </a>
+            <span class="apunte">
+              · {{ contexto_entidad(entidad, c) }}
+              · <a href="{{ url_ficha(entidad, c.id, clave) }}">ficha</a>
+            </span>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <h1>Sin resultados para «{{ consulta }}»</h1>
+      <p class="ayuda">
+        Ningún {{ etiqueta_entidad[entidad] | lower }} de la base de datos contiene ese
+        texto. Prueba con parte del nombre (los nombres de StatsBomb son completos:
+        «Messi» encuentra a «Lionel Andres Messi Cuccittini») o cambia el tipo de
+        búsqueda entre jugador y equipo.
+      </p>
+    {% endif %}
+  </section>
+{% endblock %}

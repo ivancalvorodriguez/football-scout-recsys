@@ -1,0 +1,84 @@
+{#
+  Radar de fases de juego (docs/metricas_finales.md).
+
+  Siete ejes en el equipo y seis en el jugador: la septima fase de jugador
+  (Perfil/Valor global) no es calculable desde event data abierto.
+
+  Espera `radar` (un `fases.Radar`, ya con la geometría calculada en Python) y,
+  opcionalmente, `titulo` y `amplio`. `amplio` es para cuando la figura va sola
+  en su bloque —siempre en la ficha, y en los resultados de EQUIPO, que no
+  llevan campo de posiciones al lado—: entonces se centra y se le deja más
+  ancho, en vez de quedar encogida a un lado con el hueco vacío.
+
+  La plantilla solo itera: los percentiles, los huecos y los anclajes de texto se
+  deciden en `src/app/fases.py`, que es también donde se ajusta el tamaño.
+
+  El SVG es inline y sin dependencias, como el resto de la app: tiene que
+  funcionar sin conexión.
+#}
+{% if not radar.vacio %}
+  <figure class="radar {{ 'radar-amplio' if amplio }}">
+    {% if titulo %}<figcaption class="radar-titulo">{{ titulo }}</figcaption>{% endif %}
+    <svg viewBox="{{ radar.view_box }}" role="img"
+         aria-label="Perfil por fases de juego, en percentiles">
+      <g class="radar-rejilla">
+        {% for anillo in radar.rejilla %}
+          <polygon points="{{ anillo }}"></polygon>
+        {% endfor %}
+        {% for x, y in radar.radios %}
+          <line x1="50" y1="50" x2="{{ '%.2f' % x }}" y2="{{ '%.2f' % y }}"></line>
+        {% endfor %}
+      </g>
+
+      {% for serie in radar.series %}
+        <polygon class="radar-area radar-{{ serie.clase }}" points="{{ serie.puntos }}">
+          <title>{{ serie.nombre }}</title>
+        </polygon>
+      {% endfor %}
+
+      <g class="radar-etiquetas">
+        {% for etiqueta in radar.etiquetas %}
+          <text x="{{ '%.2f' % etiqueta.x }}" y="{{ '%.2f' % etiqueta.y }}"
+                text-anchor="{{ etiqueta.anclaje }}">{{ etiqueta.texto }}</text>
+        {% endfor %}
+      </g>
+    </svg>
+
+    {% if radar.series | length > 1 %}
+      <ul class="radar-leyenda">
+        {% for serie in radar.series %}
+          <li class="radar-{{ serie.clase }}">{{ serie.nombre }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    <table class="radar-tabla">
+      <caption class="apunte">Percentil por fase</caption>
+      <thead>
+        <tr>
+          <th>Fase</th>
+          {% for serie in radar.series %}<th>{{ serie.nombre }}</th>{% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for i in range(radar.series[0].valores | length) %}
+          <tr>
+            <th scope="row" title="{{ radar.series[0].valores[i].fase.descripcion }}">
+              {{ radar.series[0].valores[i].etiqueta }}
+            </th>
+            {% for serie in radar.series %}
+              <td class="z">{{ serie.valores[i].porcentaje }}</td>
+            {% endfor %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    {% if radar.sin_dato %}
+      <p class="apunte">
+        Sin dato en {{ radar.sin_dato | join(', ') }}: ese vértice se dibuja en el
+        centro y no significa «lo peor posible».
+      </p>
+    {% endif %}
+  </figure>
+{% endif %}

@@ -316,6 +316,67 @@ class TestConstruir:
         assert set(features.NORMALIZACIONES_VALIDAS) == {"por_liga", "global"}
 
 
+class TestDerivarSinEstandarizar:
+    """`derivar` es `construir` parando antes del z-score.
+
+    Existe para poder MOSTRAR una metrica en la interfaz (a un ojeador «+2,41» no
+    le dice nada y «3,4 pases progresivos por 90'» si). Lo critico es que sus
+    columnas correspondan una a una con las del artefacto: de ahi el test de
+    orden, que se ejecuta en los tres modos de POSITION_SCALING.
+    """
+
+    @pytest.mark.parametrize("escalado", ["zscore_sqrt", "zscore", "cruda"])
+    def test_mismas_columnas_y_orden_que_construir(
+        self, escalado: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "POSITION_SCALING", escalado)
+        df = _df_jugador([{"entity_id": 1}, {"entity_id": 2}])
+        assert list(features.derivar(df, "jugador").columns) == \
+            features.construir(df, "jugador").feat_names
+
+    def test_mismas_columnas_en_equipo(self) -> None:
+        df = _df_equipo([{"entity_id": 1}, {"entity_id": 2}])
+        assert list(features.derivar(df, "equipo").columns) == \
+            features.construir(df, "equipo").feat_names
+
+    def test_devuelve_el_per90_sin_estandarizar(self) -> None:
+        """45 pases en 45' son 90 por 90', no un z-score."""
+        df = _df_jugador([{"passes": 45.0, "minutes_played": 45.0}])
+        assert features.derivar(df, "jugador")["passes"].iloc[0] == 90.0
+
+    def test_el_equipo_va_por_partido(self) -> None:
+        df = _df_equipo([{"passes": 500.0}])
+        assert features.derivar(df, "equipo")["passes"].iloc[0] == 500.0
+
+    def test_un_ratio_sin_denominador_queda_en_nan(self) -> None:
+        """Sin regates intentados no hay porcentaje; un 0 diria «0 % de acierto»."""
+        df = _df_jugador([{"take_ons": 0.0, "take_ons_won": 0.0}])
+        assert np.isnan(features.derivar(df, "jugador")["take_ons_pct"].iloc[0])
+
+    def test_entidad_desconocida(self) -> None:
+        with pytest.raises(ValueError, match="entidad desconocida"):
+            features.derivar(_df_jugador([{}]), "arbitro")
+
+
+class TestMasa:
+    def test_el_jugador_pesa_por_minutos(self) -> None:
+        df = _df_jugador([{"minutes_played": 45.0}, {"minutes_played": 90.0}])
+        assert list(features.masa(df, "jugador")) == [0.5, 1.0]
+
+    def test_el_equipo_pesa_uniforme(self) -> None:
+        """Juega el partido completo: no hay minutos de equipo en la BD."""
+        assert list(features.masa(_df_equipo([{}, {}]), "equipo")) == [1.0, 1.0]
+
+    def test_es_la_misma_que_usa_construir(self) -> None:
+        df = _df_jugador([{"minutes_played": 30.0}, {"minutes_played": 90.0}])
+        assert list(features.masa(df, "jugador")) == \
+            list(features.construir(df, "jugador").weight)
+
+    def test_entidad_desconocida(self) -> None:
+        with pytest.raises(ValueError, match="entidad desconocida"):
+            features.masa(_df_jugador([{}]), "arbitro")
+
+
 class TestPosicionOpcional:
     """La posicion (one-hot ponderado) forma parte del vector del jugador por
     defecto; `config.USE_POSITION_FEATURES` la apaga y nunca afecta al equipo.

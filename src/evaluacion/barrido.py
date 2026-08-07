@@ -78,13 +78,13 @@ from .evaluar import _fmt
 HIPERPARAMETROS: list[tuple[str, list[object]]] = [
     # Formulacion 2 (SLIM instancia-instancia): penalizacion L1 (dispersion de W)
     # y ridge L2.
-    ("F2_L1", [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875]),
-    ("F2_BETA", [6.25, 7.5, 8.75]),
+    ("F2_L1", [0.45, 0.5, 0.55, 0.625, 0.675]),
+    ("F2_BETA", [9.0, 9.25, 9.5, 9.75, 10.0, 10.25, 10.5, 10.75]),
     # Formulacion 5 (distribucional + EASE): fuerza del re-ranking EASE, barrida
     # en un rango amplio (de casi-sin-regularizar a dominado por el ridge), y
     # dimension del embedding RFF con que se aproxima el MMD del jugador.
-    ("F5_EASE_LAMBDA", [2.5, 5.0, 7.5]),
-    ("F5_RFF_DIM", [512, 768, 1024, 1536, 2048]),
+    ("F5_EASE_LAMBDA", [0.85, 0.875, 0.9]),
+    ("F5_RFF_DIM", [1024, 1152, 1280]),
 ]
 
 # El bloque de posicion del jugador (25 columnas `pos_*`) NO se barre: forma

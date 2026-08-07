@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{# `with context`: el macro necesita `referencia_z` para rotular la columna z. #}
+{% from "_rasgos.html" import tabla_rasgos with context %}
+{% from "_contexto.html" import contexto_entidad %}
+
+{% block titulo %}{{ ficha.entidad.nombre }} · Scouting por similitud{% endblock %}
+
+{% block contenido %}
+  <section class="panel referencia">
+    <p class="apunte">Ficha de {{ etiqueta_entidad[entidad] | lower }}</p>
+    <h1>{{ ficha.entidad.nombre }}</h1>
+    <p class="meta-referencia">
+      {{ contexto_entidad(entidad, ficha.entidad) }} ·
+      id {{ ficha.entidad.id }}
+    </p>
+
+    {% if entidad == 'jugador' and datos_bd and datos_bd.militancias %}
+      {# Detalle cronológico, con lo que aporta cada etapa. #}
+      <ul class="trayectoria">
+        {% for m in datos_bd.militancias %}
+          <li>
+            <strong>{{ m.nombre }}</strong>
+            {% if m.liga %}<span class="apunte">{{ [m.liga] | ligas }}</span>{% endif %}
+            <span class="apunte">
+              {{ m.partidos }} {{ 'partido' if m.partidos == 1 else 'partidos' }} ·
+              {{ '%.0f' % m.minutos }} min
+            </span>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    <p>
+      <a class="boton"
+         href="{{ url_for('web.similares', entidad=entidad, id=ficha.entidad.id,
+                          formulacion=clave.formulacion if clave else none,
+                          normalizacion=clave.normalizacion if clave else none,
+                          k=k) }}">
+        Ver {{ etiqueta_plural[entidad] }} similares
+      </a>
+    </p>
+    <p class="apunte modelo-usado">
+      Modelo: {{ etiqueta_formulacion[clave.formulacion] }} ·
+      {{ etiqueta_normalizacion[clave.normalizacion] }}
+    </p>
+  </section>
+
+  <section class="panel">
+    <h2>Perfil por fases de juego</h2>
+    <p class="ayuda">
+      Cada vértice es una fase del catálogo de métricas del proyecto. El valor es
+      el <strong>percentil</strong> de esta entidad dentro del universo del
+      modelo: se promedian los z-scores de las métricas de la fase (invirtiendo el
+      signo de aquellas en las que subir es empeorar) y se compara con el resto.
+    </p>
+    {% with amplio = true %}{% include "_radar.html" %}{% endwith %}
+    <p class="apunte">
+      Es un resumen a posteriori de <code>feat_display</code>: sirve para
+      interpretar el perfil, no interviene en el ajuste del modelo. Un percentil
+      alto es nivel relativo dentro de los datos cargados, no valor de mercado.
+    </p>
+  </section>
+
+  {% if entidad == 'jugador' and marcas %}
+    <section class="panel">
+      <h2>Dónde ha jugado</h2>
+      <p class="ayuda">
+        Reparto de sus minutos entre las posiciones de StatsBomb. El área de cada
+        burbuja es proporcional al porcentaje de minutos.
+      </p>
+      {% with nombre_a = ficha.entidad.nombre %}
+        {% include "_campo.html" %}
+      {% endwith %}
+    </section>
+  {% endif %}
+
+  <section class="panel">
+    <h2>Dónde destaca y dónde flaquea</h2>
+    <p class="ayuda">
+      Las {{ ficha.destacados | length }} métricas en las que va mejor y las
+      {{ ficha.flojos | length }} en las que va peor.
+      {% if hay_crudos %}
+        El valor va en sus unidades reales ({{ unidad }}); el z-score de al lado
+        es la distancia a {{ referencia_z }}, que es lo que decide qué métricas
+        entran en cada lista.
+      {% else %}
+        Medidas en z-scores frente a {{ referencia_z }}: sin base de datos no se
+        pueden reconstruir los valores reales.
+      {% endif %}
+      Las posiciones quedan fuera: dicen qué es la entidad, no lo bien que hace algo.
+    </p>
+    <div class="rejilla-rasgos">
+      <div>
+        <h3 class="titulo-rasgos titulo-destaca">Destaca en</h3>
+        {{ tabla_rasgos(ficha.destacados, hay_crudos) }}
+      </div>
+      <div>
+        <h3 class="titulo-rasgos titulo-flaquea">Flaquea en</h3>
+        {{ tabla_rasgos(ficha.flojos, hay_crudos) }}
+      </div>
+    </div>
+  </section>
+{% endblock %}

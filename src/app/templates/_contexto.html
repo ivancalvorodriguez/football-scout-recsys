@@ -1,0 +1,13 @@
+{#
+  Línea de contexto de una entidad: dónde ha jugado y en qué competición.
+
+  En el jugador son sus equipos agrupados por liga y en orden cronológico
+  («Sevilla, Betis (La Liga 2015/2016) · Roma (Serie A 2016/2017)»), que sale de
+  la BD. Sin BD, o en un equipo —que no milita en ningún sitio: ES el sitio—, se
+  cae a las ligas que trae el propio artefacto.
+#}
+
+{% macro contexto_entidad(entidad, e) -%}
+  {%- set trayectoria = e.id | trayectoria if entidad == 'jugador' else '' -%}
+  {{- trayectoria if trayectoria else e.ligas | ligas -}}
+{%- endmacro %}

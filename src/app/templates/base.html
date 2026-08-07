@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block titulo %}Scouting por similitud{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='estilo.css') }}">
+</head>
+<body>
+  <header class="cabecera">
+    <a class="marca" href="{{ url_for('web.inicio') }}">
+      <span class="marca-icono">⚽</span>
+      <span>Scouting por similitud</span>
+    </a>
+    <p class="lema">Recomendador de jugadores y equipos con perfil parecido, sobre StatsBomb Open Data.</p>
+  </header>
+
+  <main class="contenido">
+    {% block contenido %}{% endblock %}
+  </main>
+
+  <footer class="pie">
+    <p>
+      La similitud mide <strong>parecido de perfil y estilo</strong>, no calidad ni
+      idoneidad de un fichaje. Los modelos se construyen con
+      <code>python -m src.similitud.build</code>.
+    </p>
+  </footer>
+
+  <script src="{{ url_for('static', filename='buscador.js') }}"></script>
+  {# Mejora el tooltip de las marcas del campo; sin el, el <title> SVG sigue. #}
+  <script src="{{ url_for('static', filename='campo.js') }}"></script>
+</body>
+</html>
