@@ -33,14 +33,15 @@
     <p>
       <a class="boton"
          href="{{ url_for('web.similares', entidad=entidad, id=ficha.entidad.id,
-                          formulacion=clave.formulacion if clave else none,
-                          normalizacion=clave.normalizacion if clave else none,
+                          modelo=clave.variante if clave else none,
                           k=k) }}">
         Ver {{ etiqueta_plural[entidad] }} similares
       </a>
     </p>
     <p class="apunte modelo-usado">
-      Modelo: {{ etiqueta_formulacion[clave.formulacion] }} ·
+      Modelo: <strong>{{ variante.nombre if variante else clave.variante }}</strong> ·
+      datos: {{ conjunto.nombre if conjunto else '—' }} ·
+      {{ etiqueta_formulacion[clave.formulacion] }} ·
       {{ etiqueta_normalizacion[clave.normalizacion] }}
     </p>
   </section>
@@ -68,7 +69,7 @@
         Reparto de sus minutos entre las posiciones de StatsBomb. El área de cada
         burbuja es proporcional al porcentaje de minutos.
       </p>
-      {% with nombre_a = ficha.entidad.nombre %}
+      {% with nombre_a = ficha.entidad.nombre, amplio = true %}
         {% include "_campo.html" %}
       {% endwith %}
     </section>

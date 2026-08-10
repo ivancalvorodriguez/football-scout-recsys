@@ -12,12 +12,14 @@ posición y las métricas con las que se reconstruyen los valores reales.
 
 from __future__ import annotations
 
+import json
 from contextlib import closing
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from src.app import config as config_app
 from src.app.factoria import crear_app
 from src.extraccion import database
 from src.extraccion.config import POSITIONS_25
@@ -36,6 +38,25 @@ JUGADORES = [
     (70, "Çağlar Söyüncü"),
 ]
 EQUIPOS = [(1, "Barcelona"), (2, "Real Madrid"), (3, "Sevilla")]
+
+# Entidades que SOLO conoce el modelo reentrenado (`variante`): son las que
+# entrarian en la BD al incorporar partidos de una liga nueva. Sirven para
+# comprobar que elegir un modelo u otro cambia de verdad el universo servido, y
+# no solo la etiqueta que sale en la pagina.
+FICHAJE = (80, "Fichaje Reciente")
+EQUIPO_NUEVO = (4, "Recien Ascendido")
+
+# El modelo con nombre que deja un reentrenamiento desde la interfaz, y el
+# conjunto de datos sobre el que se entreno (el que trae a `FICHAJE` y a
+# `EQUIPO_NUEVO`). Se llaman igual a proposito: son dos catalogos distintos y el
+# fixture comprueba de paso que no se confunden.
+VARIANTE_SLUG = "con-liga-nueva"
+VARIANTE_NOMBRE = "Con liga nueva"
+CONJUNTO_SLUG = "con-liga-nueva"
+CONJUNTO_NOMBRE = "Con liga nueva"
+
+# Liga que solo existe en el conjunto ampliado.
+LIGA_NUEVA = (9, 27, "Liga Recien Llegada")
 
 # Una metrica por fase de jugador mas una columna de posicion, para que el radar
 # tenga todos sus vertices medibles y la posicion se pueda filtrar.
@@ -115,8 +136,12 @@ def _S(n: int) -> np.ndarray:
     return S
 
 
-def _modelo(entidad: str, formulacion: str, normalizacion: str) -> ModeloSimilitud:
+def _modelo(
+    entidad: str, formulacion: str, normalizacion: str, extra: bool = False
+) -> ModeloSimilitud:
     filas = JUGADORES if entidad == "jugador" else EQUIPOS
+    if extra:
+        filas = [*filas, FICHAJE if entidad == "jugador" else EQUIPO_NUEVO]
     ids = np.array([i for i, _ in filas])
     nombres = [n for _, n in filas]
     n = len(filas)
@@ -140,12 +165,39 @@ def _modelo(entidad: str, formulacion: str, normalizacion: str) -> ModeloSimilit
 
 @pytest.fixture(scope="session")
 def dir_modelos(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Directorio con las 8 combinaciones (2 formulaciones x 2 entidades x 2 norm.)."""
+    """Directorio de modelos con la misma forma que deja el pipeline real.
+
+    En la raiz, las 8 combinaciones que construye `src.similitud.build` (2
+    formulaciones x 2 entidades x 2 normalizaciones): la app solo sirve la pareja
+    de `config.MODELO_BASE`, pero el resto existe en disco y no debe estorbarle.
+
+    Y en `variantes/`, un modelo con nombre como el que deja un reentrenamiento
+    desde la interfaz: solo la pareja servible, con su `variante.json` y con una
+    entidad de mas por entidad, que es lo que aporta reentrenar tras incorporar
+    partidos.
+    """
     destino = tmp_path_factory.mktemp("modelos")
     for entidad in ("jugador", "equipo"):
         for formulacion in ("2", "5"):
             for normalizacion in ("por_liga", "global"):
                 _modelo(entidad, formulacion, normalizacion).guardar(destino)
+
+    carpeta = destino / config_app.SUBDIR_VARIANTES / VARIANTE_SLUG
+    carpeta.mkdir(parents=True)
+    (carpeta / config_app.FICHERO_VARIANTE).write_text(
+        json.dumps({
+            "nombre": VARIANTE_NOMBRE,
+            "slug": VARIANTE_SLUG,
+            "creado": "2026-02-01T10:00:00",
+            "origen": config_app.VARIANTE_BASE,
+            # Se entreno sobre el conjunto de datos ampliado, que es de donde
+            # salen las entidades de mas que conoce (ver el fixture `bd`).
+            "datos": CONJUNTO_SLUG,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    for entidad, (formulacion, normalizacion) in config_app.MODELO_BASE.items():
+        _modelo(entidad, formulacion, normalizacion, extra=True).guardar(carpeta)
     return destino
 
 
@@ -203,7 +255,63 @@ def bd(tmp_path_factory: pytest.TempPathFactory) -> Path:
                 (player_id, match_id, id_por_posicion[posicion], posicion, minutos),
             )
         conn.commit()
+    _ampliar(ruta)
     return ruta
+
+
+def _ampliar(base: Path) -> Path:
+    """Escribe el conjunto de datos ampliado a partir del base.
+
+    Reproduce lo que deja la seccion «Datos»: una COPIA del base con un partido
+    mas, de una liga que el base no tiene, que trae al jugador y al equipo que
+    solo conoce el modelo reentrenado (`FICHAJE`, `EQUIPO_NUEVO`).
+
+    Es lo que permite comprobar lo que de verdad importa: que cada modelo se
+    sirve con los adornos de SU base de datos. Con una sola BD, un jugador que
+    solo existe en la ampliada saldria sin equipo y sin posiciones.
+    """
+    destino = base.parent / config_app.SUBDIR_CONJUNTOS / CONJUNTO_SLUG / base.name
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    destino.write_bytes(base.read_bytes())
+    (destino.parent / config_app.FICHERO_CONJUNTO).write_text(
+        json.dumps({
+            "nombre": CONJUNTO_NOMBRE,
+            "slug": CONJUNTO_SLUG,
+            "creado": "2026-02-01T09:00:00",
+            "origen": config_app.VARIANTE_BASE,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    competicion, temporada, nombre_liga = LIGA_NUEVA
+    minutos = 90.0
+    with closing(database.connect(destino)) as conn:
+        database.upsert_competition(conn, {
+            "competition_id": competicion, "competition_name": nombre_liga,
+            "country_name": "Pais Nuevo", "competition_gender": "male",
+        })
+        database.upsert_team(conn, *EQUIPO_NUEVO)
+        database.upsert_player(conn, *FICHAJE)
+        database.upsert_match(conn, {
+            "match_id": 5, "competition_id": competicion,
+            "season_id": temporada, "match_date": "2016-05-01",
+        })
+        database.upsert_player_stats(conn, {
+            "player_id": FICHAJE[0], "match_id": 5, "team_id": EQUIPO_NUEVO[0],
+            "minutes_played": minutos, "passes": 45.0,
+            **{k: v for k, v in METRICAS_JUGADOR.items()},
+        })
+        database.upsert_team_stats(conn, {
+            "team_id": EQUIPO_NUEVO[0], "match_id": 5, "passes": 450.0, "npxg": 1.2,
+        })
+        id_por_posicion = {n: i for i, n in POSITIONS_25.items()}
+        conn.execute(
+            "INSERT INTO player_match_positions "
+            "(player_id, match_id, position_id, position_name, minutes) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (FICHAJE[0], 5, id_por_posicion["Right Wing"], "Right Wing", minutos),
+        )
+        conn.commit()
+    return destino
 
 
 @pytest.fixture(scope="session")

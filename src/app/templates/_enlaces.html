@@ -1,19 +1,17 @@
 {#
   Macros de enlace, para que jugador y equipo se enlacen igual desde cualquier
-  listado y el modelo elegido (formulación + normalización) viaje en la URL: la
-  ficha se lee sobre el MISMO artefacto que produjo la recomendación, no sobre el
-  que la app elegiría por defecto.
+  listado y el modelo elegido viaje en la URL: la ficha se lee sobre el MISMO
+  artefacto que produjo la recomendación, no sobre el que la app elegiría por
+  defecto (que es el base).
 #}
 
 {% macro url_ficha(entidad, id, clave) -%}
   {%- if entidad == 'equipo' -%}
     {{ url_for('web.ficha_equipo', entity_id=id,
-                formulacion=clave.formulacion if clave else none,
-                normalizacion=clave.normalizacion if clave else none) }}
+                modelo=clave.variante if clave else none) }}
   {%- else -%}
     {{ url_for('web.ficha_jugador', entity_id=id,
-                formulacion=clave.formulacion if clave else none,
-                normalizacion=clave.normalizacion if clave else none) }}
+                modelo=clave.variante if clave else none) }}
   {%- endif -%}
 {%- endmacro %}
 

@@ -29,21 +29,34 @@ def elasticnet_no_negativo(
     l1: float,
     max_iter: int = 200,
     tol: float = 1e-4,
+    w_init: np.ndarray | None = None,
 ) -> np.ndarray:
     """Resuelve  min_w (1/2)||y - A w||^2 + (beta/2)||w||^2 + l1*||w||_1,  w>=0.
 
     Coordinate descent con soft-thresholding (parte positiva por la restriccion
     w>=0). `A` es (n_muestras, n_vars), `y` es (n_muestras,). Devuelve w (n_vars,).
     Esta es exactamente la subrutina por columna de SLIM (Ec. 4 del paper).
+
+    ``w_init`` es el punto de arranque (WARM START): la solucion de un ajuste
+    anterior sobre datos parecidos. Con ``beta > 0`` el objetivo es estrictamente
+    convexo, asi que el optimo es UNICO y arrancar mas cerca solo ahorra
+    iteraciones — no cambia la solucion (mas alla de `tol`). Los negativos se
+    recortan a 0 para no arrancar fuera de la region factible.
     """
     n_vars = A.shape[1]
-    w = np.zeros(n_vars, dtype=float)
+    if w_init is None:
+        w = np.zeros(n_vars, dtype=float)
+    else:
+        w = np.maximum(np.asarray(w_init, dtype=float), 0.0)
+        if w.shape != (n_vars,):
+            raise ValueError(
+                f"w_init tiene forma {w.shape} y se esperaba ({n_vars},)")
     if n_vars == 0:
         return w
     # Norma al cuadrado de cada columna + ridge (denominador de la actualizacion).
     col_sq = np.einsum("ij,ij->j", A, A) + beta
     col_sq[col_sq == 0.0] = 1.0
-    residual = y - A @ w  # = y (w=0)
+    residual = y - A @ w  # = y cuando se arranca en frio (w=0)
     for _ in range(max_iter):
         max_delta = 0.0
         for j in range(n_vars):
@@ -93,6 +106,7 @@ def slim_instancia(
     max_iter: int = 200,
     tol: float = 1e-4,
     progreso=None,
+    inicial=None,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Formulacion 2: aprende W (M x M) instancia-instancia.
 
@@ -107,6 +121,13 @@ def slim_instancia(
     son las d dimensiones de feature; por eso la ponderacion por minutos no entra
     aqui como sample_weight, sino en la agregacion (ver `agregar_W_a_entidades`,
     opcion (b) del PDF).
+
+    ``inicial`` (opcional) es el WARM START: un callable ``inicial(s, cand)`` que
+    devuelve el vector de arranque para la columna `s` alineado con `cand`, o
+    None para arrancar en frio esa columna. La traduccion entre los indices del
+    ajuste anterior y los de ahora (las observaciones se renumeran al anadir
+    partidos, y los vecinos de cada una pueden cambiar) es responsabilidad de
+    quien lo pasa — aqui no se guarda estado de ejecuciones previas.
     """
     M = X.shape[0]
     vecinos = vecinos_mas_cercanos(X, n_neighbors)
@@ -116,7 +137,9 @@ def slim_instancia(
         cand = vecinos[s]                 # ya excluye s (w_ss = 0)
         A = X[cand].T                     # (d, n_cand): features en filas
         y = X[s]                          # (d,): observacion objetivo
-        w = elasticnet_no_negativo(A, y, beta=beta, l1=l1, max_iter=max_iter, tol=tol)
+        w0 = None if inicial is None else inicial(s, cand)
+        w = elasticnet_no_negativo(
+            A, y, beta=beta, l1=l1, max_iter=max_iter, tol=tol, w_init=w0)
         nz = w > 0.0
         cols_idx.append(cand[nz].astype(np.int64))
         cols_val.append(w[nz])

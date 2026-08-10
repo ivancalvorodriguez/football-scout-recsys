@@ -205,6 +205,46 @@ class TestUnidades:
         assert co[0].unidad == "por 90 min"
 
 
+class TestFaseDeLaCoincidencia:
+    """Cada métrica de «coinciden en» dice a qué fase de juego pertenece.
+
+    Es el puente con el radar que va justo encima, que agrupa por esas mismas
+    fases: sin ella, cuatro coincidencias sueltas no dicen si el parecido está
+    repartido o concentrado en una faceta.
+    """
+
+    def _coincidencia(self, feature: str, entidad: str) -> servicio.Coincidencia:
+        modelo = _modelo(["A", "B"], entidad=entidad, feat_names=[feature],
+                         feat_display=np.array([[2.0], [1.9]]))
+        return servicio.coincidencias(modelo, 0, 1, n=1)[0]
+
+    def test_la_lleva_cada_coincidencia(self) -> None:
+        assert self._coincidencia("progressive_passes", "jugador").fase == "Progresión"
+
+    def test_es_la_misma_taxonomia_que_el_radar(self) -> None:
+        """No una tabla propia: describir otro reparto confundiría al lector."""
+        esperada = fases.fase_por_feature("jugador")["clearances"].etiqueta
+        assert self._coincidencia("clearances", "jugador").fase == esperada
+
+    def test_depende_de_la_entidad(self) -> None:
+        """`pressures` es Defensa en el jugador y Presión en el equipo."""
+        assert self._coincidencia("pressures", "jugador").fase == "Defensa"
+        assert self._coincidencia("pressures", "equipo").fase == "Presión"
+
+    def test_una_metrica_fuera_de_la_taxonomia_se_queda_sin_fase(self) -> None:
+        """Vale más un «—» que asignarle una fase que no le toca."""
+        assert self._coincidencia("metrica_nueva_x", "jugador").fase is None
+
+    def test_la_recomendacion_entera_la_trae(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        """Cada feature del modelo de prueba es de una fase distinta."""
+        rec = servicio.recomendar(modelo_jugador, 0, k=1, n_coincidencias=6)
+        esperadas = fases.fase_por_feature("jugador")
+        for co in rec.candidatos[0].coincidencias:
+            assert co.fase == esperadas[co.feature].etiqueta
+
+
 class TestValoresReales:
     """El z-score ELIGE la métrica; el valor real es lo que se MUESTRA."""
 
@@ -319,6 +359,39 @@ class TestDestacadosYFlojos:
 
     def test_se_puede_pedir_ninguna(self, modelo_jugador: ModeloSimilitud) -> None:
         assert servicio.destacados_y_flojos(modelo_jugador, 0, n=0) == ((), ())
+
+
+class TestColorDelZScore:
+    """El color va por calidad, no por signo (`clase_z`)."""
+
+    def test_una_metrica_normal_se_pinta_por_su_signo(self) -> None:
+        assert servicio.clase_z(1.5) == "z-alto"
+        assert servicio.clase_z(-1.5) == "z-bajo"
+
+    def test_una_metrica_invertida_se_pinta_al_reves(self) -> None:
+        """Que te regateen 1,5 sigmas por encima de la media no es verde."""
+        assert servicio.clase_z(1.5, invertida=True) == "z-bajo"
+        assert servicio.clase_z(-1.5, invertida=True) == "z-alto"
+
+    def test_los_rasgos_llevan_ya_la_clase(self) -> None:
+        modelo = _modelo(["A"], feat_names=["dribbled_past", "passes"],
+                         feat_display=np.array([[3.0, 2.0]]))
+        r = servicio.rasgos(modelo, 0, n=2)
+        clases = {x.feature: x.clase_z for x in r}
+        assert clases == {"dribbled_past": "z-bajo", "passes": "z-alto"}
+
+    def test_las_coincidencias_llevan_una_clase_por_entidad(self) -> None:
+        modelo = _modelo(["A", "B"], feat_names=["dribbled_past"],
+                         feat_display=np.array([[3.0], [-3.0]]))
+        co = servicio.coincidencias(modelo, 0, 1, n=1)[0]
+        assert co.invertida
+        assert (co.clase_referencia, co.clase_candidato) == ("z-bajo", "z-alto")
+
+    def test_destacados_y_flojos_tambien(self) -> None:
+        modelo = _modelo(["A"], feat_names=["dribbled_past", "passes"],
+                         feat_display=np.array([[3.0, 1.0]]))
+        _, peores = servicio.destacados_y_flojos(modelo, 0, n=1)
+        assert peores[0].clase_z == "z-bajo"
 
 
 class TestPerfilYFicha:

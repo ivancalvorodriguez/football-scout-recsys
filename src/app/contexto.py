@@ -20,9 +20,10 @@ servidor levantado se refleja sin reiniciarlo.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -142,27 +143,73 @@ _SIN_DATOS = Jugador()
 RADIO_MARCA = 5.4
 
 
+def reparto_entero(fracciones: Sequence[float], total: int = 100) -> tuple[int, ...]:
+    """Reparte `total` puntos enteros entre `fracciones` sin perder ninguno.
+
+    Redondear cada porcentaje por su cuenta no suma 100: tres posiciones a
+    33,33 % se escriben «33 % · 33 % · 33 %» y quien lee el campo echa en falta
+    un punto; tres al 16,67 % dan 17+17+17 = 101. Se usa el método del **resto
+    mayor** (Hare-Niemeyer): a cada marca le toca su parte entera y los puntos
+    que sobran van a las que tenían el decimal más alto, así que la suma es
+    exactamente `total` y ninguna cifra se aleja más de un punto de su valor.
+
+    Las fracciones llegan ya normalizadas (cada jugador reparte sus minutos entre
+    sus posiciones), pero se vuelven a normalizar por su suma para que el reparto
+    cuadre también si el conjunto que se pasa no cubre el 100 % del jugador. Sin
+    minutos en ninguna posición no hay nada que repartir y todo queda a 0.
+    """
+    valores = [max(0.0, float(f)) for f in fracciones]
+    suma = sum(valores)
+    if suma <= 0.0:
+        return tuple(0 for _ in valores)
+    objetivo = [v * total / suma for v in valores]
+    enteros = [math.floor(v) for v in objetivo]
+    # Los empates los decide el orden de llegada, que es el de la figura: si dos
+    # posiciones tienen el mismo resto, el punto va a la que se pinta antes.
+    sobran = total - sum(enteros)
+    orden = sorted(
+        range(len(valores)), key=lambda i: (-(objetivo[i] - enteros[i]), i)
+    )
+    for i in orden[:sobran]:
+        enteros[i] += 1
+    return tuple(enteros)
+
+
+def _porcentaje(fraccion: float, entero: int | None) -> str:
+    """Cifra de una marca: la repartida si la hay, y si no el redondeo suelto."""
+    if entero is None:
+        return f"{fraccion * 100:.0f} %"
+    return f"{entero} %"
+
+
 @dataclass(frozen=True)
 class MarcaCampo:
     """Una posición dibujada sobre el campo, con la carga de uno o dos jugadores.
 
     `fraccion_otro` es `None` cuando se dibuja a un solo jugador, y 0.0 cuando se
     comparan dos y este no ha jugado nunca ahí (que es un dato, no una ausencia).
+
+    `entero`/`entero_otro` son el porcentaje YA repartido por `reparto_entero`,
+    que es cosa del conjunto de marcas y no de cada una por separado. Van a
+    `None` cuando la marca se construye suelta (fuera de `marcas_campo`): sin
+    conjunto no hay reparto que hacer y la cifra sale de redondear su fracción.
     """
 
     posicion: Posicion
     fraccion: float
     fraccion_otro: float | None = None
+    entero: int | None = None
+    entero_otro: int | None = None
 
     @property
     def porcentaje(self) -> str:
-        return f"{self.fraccion * 100:.0f} %"
+        return _porcentaje(self.fraccion, self.entero)
 
     @property
     def porcentaje_otro(self) -> str:
         if self.fraccion_otro is None:
             return "—"
-        return f"{self.fraccion_otro * 100:.0f} %"
+        return _porcentaje(self.fraccion_otro, self.entero_otro)
 
     def rotulo(self, nombre_a: str = "", nombre_b: str = "") -> str:
         """Texto del tooltip de la marca: qué posición es y cuánto se juega ahí.
@@ -193,25 +240,52 @@ def marcas_campo(
 
     Se incluyen las posiciones en las que juega CUALQUIERA de los dos: si el
     candidato juega en una banda donde la referencia no aparece, esa diferencia
-    es justo lo que hay que ver. Se ordenan de más a menos peso para que la
-    lista de debajo del campo empiece por lo importante.
+    es justo lo que hay que ver.
+
+    El orden lo marca **el primer jugador**, que es la referencia de la búsqueda:
+    la lista de debajo del campo se recorta a las primeras posiciones, así que
+    tiene que empezar por donde juega aquel de quien se buscan parecidos, no por
+    donde juega el candidato. Ordenar por el máximo de los dos metía delante
+    posiciones en las que la referencia no aparece. Con un solo jugador el
+    criterio es el mismo de siempre (de más a menos minutos).
+
+    Los porcentajes se reparten al final (`reparto_entero`) y no marca a marca,
+    para que las cifras escritas sumen 100 en cada columna aun redondeadas.
     """
     propias = {u.posicion.slug: u for u in usos}
     ajenas = {u.posicion.slug: u for u in (otros or ())}
-    marcas = [
-        MarcaCampo(
-            posicion=(propias.get(slug) or ajenas[slug]).posicion,
-            fraccion=propias[slug].fraccion if slug in propias else 0.0,
-            fraccion_otro=(
+    crudas = [
+        (
+            (propias.get(slug) or ajenas[slug]).posicion,
+            propias[slug].fraccion if slug in propias else 0.0,
+            (
                 None if otros is None
                 else (ajenas[slug].fraccion if slug in ajenas else 0.0)
             ),
         )
         for slug in propias.keys() | ajenas.keys()
     ]
-    marcas.sort(key=lambda m: (-max(m.fraccion, m.fraccion_otro or 0.0),
-                               m.posicion.etiqueta))
-    return tuple(marcas)
+    # El segundo jugador solo desempata: entre dos posiciones que la referencia
+    # usa lo mismo (a menudo, ninguna de las dos) manda el candidato.
+    crudas.sort(key=lambda c: (-c[1], -(c[2] or 0.0), c[0].etiqueta))
+
+    enteros = reparto_entero([c[1] for c in crudas])
+    comparando = otros is not None
+    enteros_otro = (
+        reparto_entero([c[2] or 0.0 for c in crudas]) if comparando
+        else [None] * len(crudas)
+    )
+    return tuple(
+        MarcaCampo(
+            posicion=posicion,
+            fraccion=fraccion,
+            fraccion_otro=fraccion_otro,
+            entero=entero,
+            entero_otro=entero_otro,
+        )
+        for (posicion, fraccion, fraccion_otro), entero, entero_otro
+        in zip(crudas, enteros, enteros_otro)
+    )
 
 
 @dataclass

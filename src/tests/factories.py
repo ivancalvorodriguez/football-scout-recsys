@@ -366,6 +366,14 @@ LIGAS_SINTETICAS: tuple[tuple[int, int, str, str], ...] = (
     (2, 200, "Liga Dos", "2020/2021"),
 )
 
+# Tercera liga, para el flujo incremental: crear la BD con `LIGAS_SINTETICAS` y
+# despues con `LIGAS_SINTETICAS + (LIGA_EXTRA,)` reproduce exactamente el caso
+# real "la BD ya tenia unas ligas y llegan partidos de otra". Las ligas se
+# generan en orden y cada una consume el rng despues de la anterior, asi que las
+# filas de las dos primeras salen IDENTICAS en ambas versiones: justo lo que el
+# reentrenamiento incremental debe poder reaprovechar.
+LIGA_EXTRA: tuple[int, int, str, str] = (3, 300, "Liga Tres", "2021/2022")
+
 
 def _metricas_jugador(rng: np.random.Generator) -> dict[str, Any]:
     """Fila jugador-partido coherente: los conteos respetan sus invariantes.
@@ -491,6 +499,7 @@ def crear_bd_sintetica(
     n_jugadores: int = 4,
     n_partidos: int = 4,
     seed: int = 7,
+    ligas: tuple[tuple[int, int, str, str], ...] = LIGAS_SINTETICAS,
 ) -> dict[str, Any]:
     """Crea una BD con el esquema REAL (`database.init_schema`) y filas sinteticas.
 
@@ -501,6 +510,9 @@ def crear_bd_sintetica(
     transformaciones distintas (con una sola liga son identicas por construccion,
     ver `comparar._avisar_si_una_sola_liga`). Devuelve un resumen con los ids y
     nombres creados.
+
+    `ligas` permite anadir una mas (ver `LIGA_EXTRA`) para montar el escenario
+    incremental sin tocar las filas de las anteriores.
     """
     rng = np.random.default_rng(seed)
     conn = db.connect(Path(db_path))
@@ -509,10 +521,10 @@ def crear_bd_sintetica(
     equipos: list[tuple[int, str]] = []
     jugadores: list[tuple[int, str]] = []
     partidos: list[int] = []
-    ligas: list[str] = []
+    claves_liga: list[str] = []
     contador_match = itertools.count(1000)
 
-    for i, (cid, sid, cname, sname) in enumerate(LIGAS_SINTETICAS):
+    for i, (cid, sid, cname, sname) in enumerate(ligas):
         db.upsert_competition(conn, {
             "competition_id": cid,
             "competition_name": cname,
@@ -520,7 +532,7 @@ def crear_bd_sintetica(
             "competition_gender": "male",
         })
         db.upsert_season(conn, {"season_id": sid, "season_name": sname})
-        ligas.append(f"{cid}-{sid}")
+        claves_liga.append(f"{cid}-{sid}")
 
         ids_equipos = [100 * (i + 1) + t for t in range(n_equipos)]
         jug_por_equipo: dict[int, list[int]] = {}
@@ -594,7 +606,7 @@ def crear_bd_sintetica(
         "equipos": equipos,
         "jugadores": jugadores,
         "partidos": partidos,
-        "ligas": ligas,
+        "ligas": claves_liga,
         "n_obs_jugador": len(partidos) * 2 * n_jugadores,
         "n_obs_equipo": len(partidos) * 2,
     }

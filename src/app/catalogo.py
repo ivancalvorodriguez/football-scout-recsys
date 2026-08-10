@@ -1,54 +1,129 @@
-"""Descubrimiento y cacheo de los modelos servibles de `outputs/modelo/`.
+"""Modelos servibles: descubrimiento, creación de nuevos y cacheo en memoria.
 
-La app no sabe a priori qué modelos existen: `src.similitud.build` puede haber
-generado solo una formulación, o solo una entidad. Este módulo escanea el
-directorio, deduce las combinaciones disponibles a partir del nombre del
-artefacto y las carga bajo demanda (`src.similitud.modelo.cargar_modelo`),
-guardándolas en memoria: la matriz S de jugadores es de 2176x2176, releerla en
-cada petición sería absurdo.
+Un **modelo** de la app es una pareja de artefactos con un nombre: el de jugador
+y el de equipo. Cuál es cuál no lo elige el usuario, lo fija
+`src.similitud.config.MODELOS_SERVIBLES` (jugador con la Formulación 5, equipo
+con la 2, las dos con z-score global). El resto de combinaciones que sabe
+construir `src.similitud.build` siguen existiendo en disco y sirven para la
+comparación experimental del TFG, pero la app no las sirve: aquí se elige entre
+MODELOS, no entre formulaciones.
 
-Junto al modelo se cachea su `MatrizFases` (el perfil por fases de TODAS las
-entidades). Se calcula aquí y no en la vista porque los percentiles necesitan el
-universo entero: es una propiedad del artefacto, no de la consulta, y comparte
-con él la invalidación.
+Hay dos clases de modelo, y las dos viven en `outputs/modelo/`:
 
-La caché se invalida por fecha de modificación del `.npz`, para que reconstruir
-los modelos con el servidor levantado se refleje sin reiniciarlo (útil en
-desarrollo y sin coste apreciable: un `stat` por petición).
+- el **base**, el de fábrica, en la raíz del directorio (lo deja `build`);
+- los **reentrenados desde la interfaz**, cada uno en
+  `outputs/modelo/variantes/<slug>/` con su `variante.json` (el nombre que
+  escribió el usuario, cuándo se creó y de qué modelo salió).
+
+El layout es el único sitio que conoce esa distinción: cada carpeta contiene
+artefactos con los MISMOS nombres de fichero, así que `cargar_modelo` y el
+reentrenamiento (`--modelos <origen> --out <destino>`) funcionan sobre cualquiera
+sin saber si es el base o uno con nombre.
+
+La carga es perezosa y cacheada: la matriz S de jugadores es de 2176x2176 y
+releerla en cada petición sería absurdo. Junto al modelo se cachea su
+`MatrizFases` (el perfil por fases de TODAS las entidades), que se calcula aquí y
+no en la vista porque los percentiles necesitan el universo entero: es una
+propiedad del artefacto, no de la consulta, y comparte con él la invalidación.
+
+La caché se invalida por fecha de modificación del `.npz`, para que reentrenar
+con el servidor levantado se refleje sin reiniciarlo (un `stat` por petición).
 """
 
 from __future__ import annotations
 
-import re
+import json
+import shutil
 import threading
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from src.similitud.modelo import ModeloSimilitud, cargar_modelo
 
 from . import config
 from .fases import MatrizFases, construir_matriz
-
-# `formulacion<N>_<entidad>[_<normalizacion>].npz`. El artefacto sin sufijo es el
-# formato antiguo y `cargar_modelo` lo trata como `por_liga`; se replica aquí esa
-# misma convención para no ofrecer combinaciones que luego no se puedan cargar.
-_PATRON = re.compile(
-    r"^formulacion(?P<formulacion>\d+)_(?P<entidad>[a-z]+)"
-    r"(?:_(?P<normalizacion>por_liga|global))?$"
-)
+# Re-exportados: dar de alta un modelo y dar de alta un conjunto de datos siguen
+# las mismas reglas de nombre (ver `nombres`).
+from .nombres import NombreInvalido, preparar, slug  # noqa: F401
 
 
 class ModeloNoDisponible(LookupError):
-    """No hay ningún artefacto para la combinación pedida."""
+    """No hay ningún artefacto para el modelo pedido."""
+
+
+# --- Identidad de un modelo ---------------------------------------------------
+
+@dataclass(frozen=True)
+class Variante:
+    """Un modelo con nombre: el base o uno reentrenado desde la interfaz.
+
+    `entidades` son los tipos de entidad para los que YA tiene artefacto
+    completo (`.npz` + `.json`). Puede estar vacío mientras el reentrenamiento
+    corre: la carpeta y su `variante.json` se crean antes de lanzar la tarea, así
+    que la página de datos puede enseñar el modelo «en construcción» sin que el
+    buscador llegue a ofrecerlo.
+    """
+
+    slug: str
+    nombre: str
+    entidades: tuple[str, ...] = ()
+    creado: str | None = None
+    origen: str | None = None
+    # Conjunto de datos con el que se entrenó (slug de `conjuntos`). El de
+    # fábrica no lo lleva apuntado: sale del conjunto base, que es de donde
+    # `build` lee por defecto.
+    datos: str = config.VARIANTE_BASE
+
+    @property
+    def es_base(self) -> bool:
+        return self.slug == config.VARIANTE_BASE
+
+    @property
+    def completo(self) -> bool:
+        """True si sirve a las dos entidades (lo normal tras un reentrenamiento)."""
+        return set(self.entidades) == set(config.ENTIDADES)
+
+    @property
+    def fecha(self) -> datetime | None:
+        """`creado` como fecha, o None si no lo lleva (el base no lo lleva)."""
+        if not self.creado:
+            return None
+        try:
+            return datetime.fromisoformat(self.creado)
+        except ValueError:
+            return None
 
 
 @dataclass(frozen=True, order=True)
 class ClaveModelo:
-    """Identifica un artefacto servible. Ordenable para listados estables."""
+    """Identifica un artefacto servible: qué entidad, de qué modelo.
+
+    La formulación y la normalización NO son parte de la elección: se deducen de
+    la entidad (`config.MODELO_BASE`). Se exponen como propiedades porque la
+    interfaz sí las rotula —el usuario tiene derecho a saber con qué se le está
+    respondiendo— y porque son las que forman el nombre del artefacto.
+    """
 
     entidad: str
-    formulacion: str
-    normalizacion: str
+    variante: str = config.VARIANTE_BASE
+
+    @property
+    def formulacion(self) -> str:
+        return config.MODELO_BASE.get(self.entidad, ("", ""))[0]
+
+    @property
+    def normalizacion(self) -> str:
+        return config.MODELO_BASE.get(self.entidad, ("", ""))[1]
+
+    @property
+    def es_base(self) -> bool:
+        return self.variante == config.VARIANTE_BASE
+
+    @property
+    def stem(self) -> str:
+        """Nombre (sin extensión) del artefacto dentro de la carpeta del modelo."""
+        return f"formulacion{self.formulacion}_{self.entidad}_{self.normalizacion}"
 
     @property
     def etiqueta(self) -> str:
@@ -78,32 +153,92 @@ class Catalogo:
         self._cache: dict[ClaveModelo, tuple[tuple[float, int], Cargado]] = {}
         self._lock = threading.Lock()
 
+    # --- Layout --------------------------------------------------------------
+
+    @property
+    def dir_variantes(self) -> Path:
+        """Carpeta que agrupa los modelos con nombre."""
+        return self.model_dir / config.SUBDIR_VARIANTES
+
+    def dir_modelo(self, variante: str) -> Path:
+        """Carpeta de un modelo: la raíz si es el base, su subcarpeta si no."""
+        if variante == config.VARIANTE_BASE:
+            return self.model_dir
+        return self.dir_variantes / variante
+
     # --- Descubrimiento ------------------------------------------------------
 
-    def disponibles(self) -> list[ClaveModelo]:
-        """Combinaciones presentes en disco, ordenadas y sin duplicados.
+    def _entidades_en(self, carpeta: Path) -> tuple[str, ...]:
+        """Entidades con artefacto completo en esa carpeta.
 
         Un `.npz` sin su `.json` no cuenta: el JSON trae los nombres de las
         entidades, sin los cuales el modelo no se puede consultar por nombre.
         """
-        if not self.model_dir.is_dir():
-            return []
-        claves: set[ClaveModelo] = set()
-        for npz in self.model_dir.glob("formulacion*.npz"):
-            m = _PATRON.match(npz.stem)
-            if m is None or not npz.with_suffix(".json").exists():
-                continue
-            entidad = m.group("entidad")
-            formulacion = m.group("formulacion")
-            if entidad not in config.ENTIDADES or formulacion not in config.FORMULACIONES:
-                continue
-            claves.add(ClaveModelo(
-                entidad=entidad,
-                formulacion=formulacion,
-                # Sin sufijo = artefacto antiguo, servido como `por_liga`.
-                normalizacion=m.group("normalizacion") or "por_liga",
-            ))
-        return sorted(claves)
+        presentes = []
+        for entidad in config.ENTIDADES:
+            npz = carpeta / f"{ClaveModelo(entidad).stem}.npz"
+            if npz.exists() and npz.with_suffix(".json").exists():
+                presentes.append(entidad)
+        return tuple(presentes)
+
+    def _leer_metadatos(self, carpeta: Path) -> dict:
+        ruta = carpeta / config.FICHERO_VARIANTE
+        try:
+            # `utf-8-sig` y no `utf-8`: el fichero lo escribe `crear_variante` sin
+            # BOM, pero es texto que un usuario puede reescribir a mano (para
+            # renombrar el modelo), y en Windows casi cualquier editor le mete uno.
+            datos = json.loads(ruta.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return datos if isinstance(datos, dict) else {}
+
+    def variantes(self) -> list[Variante]:
+        """Modelos declarados, el base primero y el resto por fecha de creación.
+
+        Incluye los que todavía no tienen artefactos (reentrenamiento en curso o
+        fallido): quien quiera solo los servibles mira `entidades`, y para eso
+        está `disponibles()`.
+        """
+        salida = [Variante(
+            slug=config.VARIANTE_BASE,
+            nombre=config.NOMBRE_BASE,
+            entidades=self._entidades_en(self.model_dir),
+        )]
+        if self.dir_variantes.is_dir():
+            nombradas = []
+            for carpeta in self.dir_variantes.iterdir():
+                if not carpeta.is_dir():
+                    continue
+                meta = self._leer_metadatos(carpeta)
+                nombradas.append(Variante(
+                    slug=carpeta.name,
+                    nombre=str(meta.get("nombre") or carpeta.name),
+                    entidades=self._entidades_en(carpeta),
+                    creado=meta.get("creado"),
+                    origen=meta.get("origen"),
+                    datos=str(meta.get("datos") or config.VARIANTE_BASE),
+                ))
+            # Por fecha y, sin ella (metadatos ilegibles), por slug: el orden
+            # tiene que ser estable entre peticiones o los desplegables bailan.
+            nombradas.sort(key=lambda v: (v.creado or "", v.slug))
+            salida += nombradas
+        return salida
+
+    def variante(self, slug_pedido: str) -> Variante:
+        """El modelo de ese slug. `ModeloNoDisponible` si no existe."""
+        for v in self.variantes():
+            if v.slug == slug_pedido:
+                return v
+        raise ModeloNoDisponible(f"No existe ningún modelo llamado {slug_pedido!r}.")
+
+    def disponibles(self) -> list[ClaveModelo]:
+        """Artefactos presentes en disco (entidad x modelo), en orden estable."""
+        return [
+            ClaveModelo(entidad=entidad, variante=v.slug)
+            for v in self.variantes()
+            for entidad in config.ENTIDADES
+            if entidad in v.entidades
+        ]
 
     def entidades_disponibles(self) -> list[str]:
         """Tipos de entidad con al menos un modelo, en el orden de `config`."""
@@ -111,23 +246,26 @@ class Catalogo:
         return [e for e in config.ENTIDADES if e in con_modelo]
 
     def opciones(self, entidad: str) -> list[ClaveModelo]:
-        """Modelos disponibles para un tipo de entidad."""
+        """Modelos servibles para un tipo de entidad, el base primero."""
         return [c for c in self.disponibles() if c.entidad == entidad]
+
+    def opciones_de_variante(self, variante: str) -> list[ClaveModelo]:
+        """Artefactos servibles de un modelo concreto (0, 1 o 2)."""
+        return [c for c in self.disponibles() if c.variante == variante]
+
+    def variantes_de(self, entidad: str) -> list[Variante]:
+        """Modelos que pueden responder por esa entidad (para el desplegable)."""
+        return [v for v in self.variantes() if entidad in v.entidades]
 
     # --- Resolución ----------------------------------------------------------
 
-    def resolver(
-        self,
-        entidad: str,
-        formulacion: str | None = None,
-        normalizacion: str | None = None,
-    ) -> ClaveModelo:
+    def resolver(self, entidad: str, variante: str | None = None) -> ClaveModelo:
         """Clave concreta a partir de una petición posiblemente incompleta.
 
         Lo único obligatorio es la entidad (es lo que pide el usuario: jugador o
-        equipo). Formulación y normalización se completan con el orden de
-        preferencia de `config` entre lo que realmente exista, para que la app
-        funcione aunque solo se haya construido una parte de los modelos.
+        equipo). Sin modelo explícito se sirve el base, y si el base no cubre esa
+        entidad, el primero que la cubra: la app tiene que seguir sirviendo
+        aunque solo se haya construido una parte de los artefactos.
         """
         candidatos = self.opciones(entidad)
         if not candidatos:
@@ -135,24 +273,14 @@ class Catalogo:
                 f"No hay ningún modelo de '{entidad}' en {self.model_dir}. "
                 f"Constrúyelos con: python -m src.similitud.build"
             )
-        if formulacion is not None:
-            candidatos = [c for c in candidatos if c.formulacion == formulacion]
-        if normalizacion is not None:
-            candidatos = [c for c in candidatos if c.normalizacion == normalizacion]
-        if not candidatos:
-            pedido = (
-                f"entidad={entidad!r}, formulacion={formulacion!r}, "
-                f"normalizacion={normalizacion!r}"
+        if variante is not None:
+            for clave in candidatos:
+                if clave.variante == variante:
+                    return clave
+            raise ModeloNoDisponible(
+                f"El modelo {variante!r} no tiene artefacto de {entidad}."
             )
-            raise ModeloNoDisponible(f"No hay modelo para {pedido}.")
-
-        def preferencia(clave: ClaveModelo) -> tuple[int, int]:
-            return (
-                _indice(config.PREFERENCIA_FORMULACION, clave.formulacion),
-                _indice(config.PREFERENCIA_NORMALIZACION, clave.normalizacion),
-            )
-
-        return min(candidatos, key=preferencia)
+        return candidatos[0]
 
     # --- Carga ---------------------------------------------------------------
 
@@ -177,7 +305,7 @@ class Catalogo:
         # Fuera del lock: cargar es lento (I/O + descompresión) y no queremos
         # bloquear al resto de peticiones mientras tanto.
         modelo = cargar_modelo(
-            self.model_dir,
+            self.dir_modelo(clave.variante),
             clave.formulacion,
             clave.entidad,
             normalizacion=clave.normalizacion,
@@ -197,14 +325,50 @@ class Catalogo:
         return self.cargado(clave).modelo
 
     def _ruta(self, clave: ClaveModelo) -> Path:
-        """Ruta del `.npz` de `clave` (con el fallback sin sufijo de `por_liga`)."""
-        base = f"formulacion{clave.formulacion}_{clave.entidad}"
-        con_sufijo = self.model_dir / f"{base}_{clave.normalizacion}.npz"
-        if con_sufijo.exists() or clave.normalizacion != "por_liga":
-            return con_sufijo
-        return self.model_dir / f"{base}.npz"
+        """Ruta del `.npz` de `clave`."""
+        return self.dir_modelo(clave.variante) / f"{clave.stem}.npz"
 
+    # --- Alta de un modelo nuevo ---------------------------------------------
 
-def _indice(orden: tuple[str, ...], valor: str) -> int:
-    """Posición de `valor` en `orden`; al final si no aparece."""
-    return orden.index(valor) if valor in orden else len(orden)
+    def crear_variante(self, nombre: str, origen: str = config.VARIANTE_BASE,
+                       datos: str = config.VARIANTE_BASE) -> Variante:
+        """Reserva la carpeta de un modelo nuevo y escribe su `variante.json`.
+
+        Se llama ANTES de lanzar el reentrenamiento, por dos motivos: el comando
+        necesita un `--out` que exista y el nombre solo lo conoce la app (el CLI
+        trabaja con rutas). Si el reentrenamiento falla, queda una carpeta sin
+        artefactos, que la página marca como incompleta y el buscador ignora.
+
+        `datos` es el conjunto de datos sobre el que se entrena. Se apunta aquí
+        porque después hace falta para SERVIRLO: el equipo de cada jugador, sus
+        minutos por posición y los valores reales de las métricas salen de esa
+        misma BD, y leerlos de otra dejaría sin contexto justo a las entidades
+        que aporta el conjunto nuevo.
+        """
+        limpio, destino = preparar(
+            nombre, (v.slug for v in self.variantes()), "modelo")
+        carpeta = self.dir_variantes / destino
+        carpeta.mkdir(parents=True)
+        variante = Variante(
+            slug=destino,
+            nombre=limpio,
+            creado=datetime.now().isoformat(timespec="seconds"),
+            origen=origen,
+            datos=datos,
+        )
+        (carpeta / config.FICHERO_VARIANTE).write_text(
+            json.dumps(
+                {"nombre": variante.nombre, "slug": variante.slug,
+                 "creado": variante.creado, "origen": variante.origen,
+                 "datos": variante.datos},
+                ensure_ascii=False, indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return variante
+
+    def descartar_variante(self, slug_pedido: str) -> None:
+        """Borra la carpeta de un modelo recién creado (alta que no se lanzó)."""
+        if slug_pedido == config.VARIANTE_BASE:
+            raise ValueError("el modelo base no se descarta")
+        shutil.rmtree(self.dir_variantes / slug_pedido, ignore_errors=True)

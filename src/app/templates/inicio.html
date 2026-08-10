@@ -13,15 +13,23 @@
   <section class="panel panel-secundario">
     <h2>Modelos cargados</h2>
     <p class="ayuda">
-      Cada combinación es un artefacto entrenado distinto: las dos formulaciones SLIM
-      se comparan entre sí, igual que las dos normalizaciones.
+      Cada modelo es un entrenamiento distinto sobre la base de datos, con un
+      artefacto por entidad. El primero es el de fábrica; los demás salen de
+      reentrenar en <a href="{{ url_for('datos.panel') }}">Datos y modelos</a>
+      tras incorporar partidos nuevos. Todos usan la misma receta para
+      {{ etiqueta_plural[entidad] }}:
+      {{ etiqueta_formulacion[receta.formulacion] }},
+      {{ etiqueta_normalizacion[receta.normalizacion] }}.
     </p>
     <ul class="lista-modelos">
-      {% for opcion in opciones %}
+      {% for v in variantes %}
         <li>
-          <span class="etiqueta-modelo">F{{ opcion.formulacion }}</span>
-          {{ etiqueta_formulacion[opcion.formulacion] }}
-          <span class="apunte">· {{ etiqueta_normalizacion[opcion.normalizacion] }}</span>
+          <span class="etiqueta-modelo">{{ v.nombre }}</span>
+          {{ 'modelo de fábrica' if v.es_base else 'reentrenado' }}
+          <span class="apunte">
+            · datos: {{ nombres_conjunto.get(v.datos, v.datos) }}
+            {%- if v.fecha %} · {{ v.fecha.strftime("%d/%m/%Y %H:%M") }}{% endif %}
+          </span>
         </li>
       {% else %}
         <li class="apunte">No hay modelos de {{ etiqueta_plural[entidad] }}.</li>

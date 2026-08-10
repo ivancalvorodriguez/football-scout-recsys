@@ -15,6 +15,24 @@ from src.extraccion.config import POSITIONS_25, position_slug
 DEFAULT_DB_PATH = Path("outputs/db/scouting.db")
 DEFAULT_MODEL_DIR = Path("outputs/modelo")
 
+# --- Modelos servibles: uno por tipo de entidad ------------------------------
+# (formulacion, normalizacion) con la que se SIRVE cada entidad. `build` sigue
+# generando las cuatro combinaciones de cada entidad —comparar las dos
+# formulaciones y las dos normalizaciones es el eje experimental del TFG y eso no
+# cambia—, pero la app y el reentrenamiento desde la interfaz trabajan solo con
+# estas dos: el usuario elige entre MODELOS (base, reentrenados), no entre
+# variantes metodologicas que no puede juzgar desde el navegador.
+#
+# La eleccion sale de la evaluacion (`outputs/evaluacion/`): la F5 distribucional
+# cubre a todos los jugadores (la F2 deja fuera a los poco conectados, ver
+# `modelo.top_k`) y la F2 se comporta mejor con los pocos cientos de equipos.
+# `global` en las dos para que jugador y equipo se lean contra la misma
+# referencia (la media de todo el dataset).
+MODELOS_SERVIBLES: dict[str, tuple[str, str]] = {
+    "jugador": ("5", "global"),
+    "equipo": ("2", "global"),
+}
+
 # --- Posicion como feature del jugador (one-hot ponderado por % de minutos) ---
 # Catalogo canonico de las 25 posiciones StatsBomb -> slugs de columna, en orden
 # estable de position_id (1..25). Es la unica fuente de verdad del catalogo

@@ -11,14 +11,45 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from src.extraccion.config import DATA_ROOT
 from src.similitud import config as config_similitud
 
+# Raíz del repositorio: `src/app/config.py` -> subir tres niveles. Desde ahí se
+# lanzan las tareas de la sección «Datos», igual que se lanzarían a mano.
+RAIZ_REPO = Path(__file__).resolve().parents[2]
+
+# Carpeta que propone el formulario de «Añadir partidos». El dataset vendido con
+# el proyecto ya tiene el formato de paquete que se espera, así que sirve de
+# ejemplo listo para usar.
+PAQUETE_DEFECTO = str(DATA_ROOT)
+
 # --- Universo de modelos servibles -------------------------------------------
-# Mismos valores que aceptan los CLI de `src.similitud`; la app no inventa
-# ninguno: solo sirve lo que exista en disco dentro de estas combinaciones.
 ENTIDADES: tuple[str, ...] = ("jugador", "equipo")
-FORMULACIONES: tuple[str, ...] = ("2", "5")
-NORMALIZACIONES: tuple[str, ...] = ("por_liga", "global")
+
+# Con qué (formulación, normalización) se sirve cada entidad. Lo decide
+# `src.similitud.config`, que es donde vive esa elección para todo el proyecto:
+# la app no ofrece las cuatro combinaciones por entidad que sabe construir
+# `build`, sino UNA por entidad. Lo que el usuario elige aquí es el MODELO
+# (el de fábrica o uno reentrenado por él), no la formulación.
+MODELO_BASE: dict[str, tuple[str, str]] = dict(config_similitud.MODELOS_SERVIBLES)
+
+# --- Modelos y conjuntos de datos con nombre ----------------------------------
+# Dos escalones con la misma forma: lo de fábrica vive en la raíz de su
+# directorio y lo que crea el usuario, en una subcarpeta con su nombre.
+#
+# - Modelos (`catalogo`): `outputs/modelo/` y `outputs/modelo/variantes/<slug>/`.
+# - Conjuntos de datos (`conjuntos`): `outputs/db/scouting.db` y
+#   `outputs/db/conjuntos/<slug>/scouting.db`.
+#
+# El slug `base` y la etiqueta valen para los dos (no se cruzan: cada uno se
+# resuelve dentro de su catálogo).
+VARIANTE_BASE = "base"
+NOMBRE_BASE = "Base"
+SUBDIR_VARIANTES = "variantes"
+FICHERO_VARIANTE = "variante.json"
+SUBDIR_CONJUNTOS = "conjuntos"
+FICHERO_CONJUNTO = "conjunto.json"
+MAX_LARGO_NOMBRE = 60
 
 # Etiquetas para la interfaz (el resto del proyecto habla en español).
 ETIQUETA_ENTIDAD = {"jugador": "Jugador", "equipo": "Equipo"}
@@ -46,14 +77,6 @@ REFERENCIA_Z = {
 # Sin modelo elegido (páginas de error) no se sabe cuál de las dos es: se dice
 # lo único cierto en ambos casos.
 REFERENCIA_Z_DEFECTO = "la media de referencia del modelo"
-
-# --- Preferencias de selección -----------------------------------------------
-# Orden de preferencia al elegir modelo cuando el usuario no lo especifica. La 5
-# va primera solo por ser la más rápida de servir y la que cubre a todas las
-# entidades (la 2 deja fuera a las poco conectadas, ver `modelo.top_k`); NO es un
-# juicio sobre cuál formulación es mejor — el proyecto las compara, no elige.
-PREFERENCIA_FORMULACION: tuple[str, ...] = ("5", "2")
-PREFERENCIA_NORMALIZACION: tuple[str, ...] = ("por_liga", "global")
 
 # --- Parámetros de consulta ---------------------------------------------------
 TOP_K_DEFECTO = config_similitud.DEFAULT_TOP_K   # 10

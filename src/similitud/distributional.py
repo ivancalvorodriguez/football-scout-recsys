@@ -66,8 +66,20 @@ def _embed_entidades(
     return suma / masa[:, None]
 
 
+def sigma_kernel(X: np.ndarray) -> float:
+    """Ancho del kernel RBF que usaria un ajuste en frio sobre `X`.
+
+    Expuesto aparte para poder CONGELARLO al reentrenar: el ancho sale de la
+    mediana de distancias de todo el dataset, asi que anadir partidos lo mueve y
+    con el se mueve el embedding de TODAS las entidades, incluidas las que no han
+    cambiado. Reutilizando el sigma anterior, las entidades antiguas conservan su
+    embedding exacto y las nuevas entran en el mismo espacio.
+    """
+    return _sigma_mediana(X, config.F5_RFF_SEED)
+
+
 def similitud_mmd(
-    mf: MatrizFeatures, ent_idx: np.ndarray, n_ent: int
+    mf: MatrizFeatures, ent_idx: np.ndarray, n_ent: int, sigma: float | None = None
 ) -> np.ndarray:
     """S[a,b] = <mu_a, mu_b> / (||mu_a|| ||mu_b||): COSENO entre kernel mean embeddings.
 
@@ -80,8 +92,12 @@ def similitud_mmd(
     RBF, phi tiene componentes >0, asi que el coseno queda en ~[0,1] (mismo orden
     de magnitud que el producto crudo, que ya estaba acotado por k<=1: EASE no
     necesita recalibrar lambda). Diagonal a 0 (se ignora al servir).
+
+    ``sigma`` fija el ancho del kernel en vez de estimarlo de `mf.X` (ver
+    `sigma_kernel`); None = estimarlo, que es el ajuste en frio de siempre.
     """
-    sigma = _sigma_mediana(mf.X, config.F5_RFF_SEED)
+    if sigma is None:
+        sigma = sigma_kernel(mf.X)
     Z = _rff(mf.X, config.F5_RFF_DIM, sigma, config.F5_RFF_SEED)
     mu = _embed_entidades(Z, ent_idx, mf.weight, n_ent)
     norms = np.linalg.norm(mu, axis=1)
@@ -114,14 +130,24 @@ def _sinkhorn_costo(
     return float(np.sum(np.exp(logP) * C))
 
 
-def similitud_sinkhorn(
-    mf: MatrizFeatures, ent_idx: np.ndarray, n_ent: int, progreso=None
+def costos_sinkhorn(
+    mf: MatrizFeatures,
+    ent_idx: np.ndarray,
+    n_ent: int,
+    progreso=None,
+    previos: np.ndarray | None = None,
 ) -> np.ndarray:
-    """S[a,b] = exp(-OT(nube_a, nube_b)); OT entropico exacto por pares.
+    """Matriz (n_ent x n_ent) de coste de transporte optimo entre cada par de nubes.
+
+    ``previos`` (misma forma, NaN donde no se sabe) permite REUTILIZAR costes de
+    un ajuste anterior: los pares con valor finito no se recalculan. Es
+    reutilizacion exacta, no una aproximacion — el coste OT entre dos nubes
+    depende solo de esas dos nubes, asi que si ninguna ha cambiado el numero es
+    identico. Quien lo pasa es responsable de poner NaN en todo par que involucre
+    una nube tocada (ver `src.incremental`).
 
     ``progreso`` (opcional): callable ``progreso(hecho, total)`` invocado por cada
-    entidad del bucle externo (O(n_ent^2) pares de transporte optimo); permite
-    seguir el avance. None (por defecto) no hace nada.
+    entidad del bucle externo (O(n_ent^2) pares); permite seguir el avance.
     """
     filas_por_ent = [np.where(ent_idx == e)[0] for e in range(n_ent)]
     reg, iters = config.F5_SINKHORN_REG, config.F5_SINKHORN_ITERS
@@ -130,14 +156,27 @@ def similitud_sinkhorn(
         Ra = filas_por_ent[a]
         Xa, wa = mf.X[Ra], mf.weight[Ra]
         for b in range(a + 1, n_ent):
-            Rb = filas_por_ent[b]
-            c = _sinkhorn_costo(Xa, wa, mf.X[Rb], mf.weight[Rb], reg, iters)
+            if previos is not None and np.isfinite(previos[a, b]):
+                c = float(previos[a, b])
+            else:
+                Rb = filas_por_ent[b]
+                c = _sinkhorn_costo(Xa, wa, mf.X[Rb], mf.weight[Rb], reg, iters)
             costo[a, b] = costo[b, a] = c
         if progreso is not None:
             progreso(a + 1, n_ent)
-    # Kernel gaussiano sobre el coste OT con ancho = mediana de los costes: en
-    # ~30 dimensiones estandarizadas el coste vale decenas y exp(-coste) haria
-    # underflow (toda S ~ 0, sin contraste); la mediana lo lleva a un rango util.
+    return costo
+
+
+def kernel_desde_costos(costo: np.ndarray) -> np.ndarray:
+    """Coste OT -> similitud. Kernel gaussiano con ancho = mediana de los costes.
+
+    En ~30 dimensiones estandarizadas el coste vale decenas y `exp(-coste)` haria
+    underflow (toda S ~ 0, sin contraste); la mediana lo lleva a un rango util.
+    La mediana se recalcula siempre sobre los costes vigentes: es una escala
+    global, asi que anadir entidades la mueve un poco aunque los costes antiguos
+    sean identicos (efecto monotono, no altera el orden de un top-k).
+    """
+    n_ent = costo.shape[0]
     triu = costo[np.triu_indices(n_ent, k=1)]
     escala = np.median(triu) if triu.size else 1.0
     escala = escala or 1.0
@@ -146,16 +185,36 @@ def similitud_sinkhorn(
     return S
 
 
+def similitud_sinkhorn(
+    mf: MatrizFeatures,
+    ent_idx: np.ndarray,
+    n_ent: int,
+    progreso=None,
+    previos: np.ndarray | None = None,
+) -> np.ndarray:
+    """S[a,b] = exp(-OT(nube_a, nube_b)/escala); OT entropico exacto por pares."""
+    costo = costos_sinkhorn(mf, ent_idx, n_ent, progreso=progreso, previos=previos)
+    return kernel_desde_costos(costo)
+
+
 def construir_S(
-    mf: MatrizFeatures, ent_idx: np.ndarray, n_ent: int, metodo: str, progreso=None
+    mf: MatrizFeatures,
+    ent_idx: np.ndarray,
+    n_ent: int,
+    metodo: str,
+    progreso=None,
+    sigma: float | None = None,
+    costos_previos: np.ndarray | None = None,
 ) -> np.ndarray:
     """Matriz de similitud distribucional P x P segun el metodo elegido.
 
     ``progreso`` solo aplica al metodo ``sinkhorn`` (bucle costoso); ``mmd`` esta
-    vectorizado y no lo necesita.
+    vectorizado y no lo necesita. ``sigma`` (mmd) y ``costos_previos`` (sinkhorn)
+    son las dos vias de reaprovechar un ajuste anterior; None en ambas = frio.
     """
     if metodo == "mmd":
-        return similitud_mmd(mf, ent_idx, n_ent)
+        return similitud_mmd(mf, ent_idx, n_ent, sigma=sigma)
     if metodo == "sinkhorn":
-        return similitud_sinkhorn(mf, ent_idx, n_ent, progreso=progreso)
+        return similitud_sinkhorn(
+            mf, ent_idx, n_ent, progreso=progreso, previos=costos_previos)
     raise ValueError(f"metodo distribucional desconocido: {metodo!r}")

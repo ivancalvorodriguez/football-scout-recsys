@@ -13,6 +13,7 @@ Rutas:
 - ``GET /similares``            resultados (o lista de candidatos si el nombre es ambiguo).
 - ``GET /jugador/<id>``         ficha detallada de un jugador.
 - ``GET /equipo/<id>``          ficha detallada de un equipo.
+- ``GET /glosario``             qué mide cada métrica, por entidad y fase.
 - ``GET /api/sugerencias``      autocompletado (JSON).
 - ``GET /api/similares``        mismo resultado que ``/similares`` en JSON.
 - ``GET /api/ficha/<entidad>/<id>``  misma ficha en JSON.
@@ -26,8 +27,9 @@ from flask import Blueprint, current_app, jsonify, render_template, request
 
 from src.similitud.consulta import EntidadAmbigua, EntidadNoEncontrada, resolver
 
-from . import config, servicio
+from . import config, fuentes, glosario, servicio
 from .catalogo import Catalogo, Cargado, ClaveModelo, ModeloNoDisponible
+from .conjuntos import CatalogoDatos, Conjunto
 from .contexto import CatalogoContexto, texto_trayectoria
 from .crudos import CatalogoCrudos
 from .fases import radar
@@ -46,12 +48,37 @@ def _catalogo() -> Catalogo:
     return current_app.extensions["catalogo"]
 
 
+def _catalogo_datos() -> CatalogoDatos:
+    return current_app.extensions["datos"]
+
+
+def _fuentes() -> fuentes.Fuentes:
+    return current_app.extensions["fuentes"]
+
+
 def _contexto_bd() -> CatalogoContexto:
-    return current_app.extensions["contexto"]
+    return _fuentes().contexto()
 
 
 def _crudos_bd() -> CatalogoCrudos:
-    return current_app.extensions["crudos"]
+    return _fuentes().crudos()
+
+
+def _conjunto(clave: ClaveModelo) -> Conjunto:
+    """Conjunto de datos del modelo `clave`, y lo fija para esta petición.
+
+    A partir de aquí, todo lo que la interfaz saca de la BD —el equipo de cada
+    jugador, sus minutos por posición, los valores reales y los nombres de
+    liga— sale de ESA base de datos. Sin esto, un modelo entrenado sobre datos
+    ampliados se serviría con los adornos de la BD vieja y las entidades nuevas
+    saldrían sin nada.
+    """
+    variante = _catalogo().variante(clave.variante)
+    # `resolver` cae al base si ese conjunto ya no está: se pierde algún adorno,
+    # pero el modelo se sigue sirviendo.
+    conjunto = _catalogo_datos().resolver(variante.datos)
+    fuentes.usar(conjunto.ruta)
+    return conjunto
 
 
 def _crudos(cargado: Cargado):
@@ -86,14 +113,20 @@ def _entidad_pedida() -> str:
     return entidad
 
 
-def _opcion(nombre: str, validas: tuple[str, ...]) -> str | None:
-    """Parámetro opcional restringido a un conjunto de valores."""
-    valor = (request.args.get(nombre) or "").strip()
+def _modelo_pedido() -> str | None:
+    """Modelo (`?modelo=<slug>`) de la petición, si viene.
+
+    Se valida contra los que existen en disco y no contra una lista fija: los
+    modelos con nombre los crea el usuario reentrenando, así que el universo
+    cambia mientras la app corre.
+    """
+    valor = (request.args.get("modelo") or "").strip()
     if not valor:
         return None
-    if valor not in validas:
+    disponibles = [v.slug for v in _catalogo().variantes()]
+    if valor not in disponibles:
         raise PeticionInvalida(
-            f"{nombre} desconocida: {valor!r}. Válidas: {', '.join(validas)}."
+            f"Modelo desconocido: {valor!r}. Disponibles: {', '.join(disponibles)}."
         )
     return valor
 
@@ -117,12 +150,15 @@ def _k_pedido() -> int:
 
 
 def _clave_pedida(entidad: str) -> ClaveModelo:
-    """Modelo a usar según los parámetros (completando lo no especificado)."""
-    return _catalogo().resolver(
-        entidad,
-        formulacion=_opcion("formulacion", config.FORMULACIONES),
-        normalizacion=_opcion("normalizacion", config.NORMALIZACIONES),
-    )
+    """Modelo a usar según los parámetros (el base si no se pide otro).
+
+    Además **fija el conjunto de datos** de la petición, el del modelo elegido:
+    es el único punto por el que pasan todas las vistas, así que es donde tiene
+    que quedar decidido de qué BD salen los adornos (ver `_conjunto`).
+    """
+    clave = _catalogo().resolver(entidad, variante=_modelo_pedido())
+    _conjunto(clave)
+    return clave
 
 
 def _id_pedido() -> int | None:
@@ -166,10 +202,27 @@ def _referencia_z(clave: ClaveModelo | None) -> str:
 
 def _contexto_base(entidad: str, clave: ClaveModelo | None = None) -> dict[str, Any]:
     catalogo = _catalogo()
+    # Los modelos del desplegable son los que cubren ESTA entidad: uno recién
+    # reentrenado puede tener todavía el artefacto de jugador y no el de equipo.
+    variantes = catalogo.variantes_de(entidad)
     return {
         "entidad": entidad,
         "entidades": catalogo.entidades_disponibles(),
-        "opciones": catalogo.opciones(entidad),
+        "variantes": variantes,
+        # Con qué se construye esta entidad (misma receta en todos los modelos):
+        # la interfaz lo rotula aunque el usuario no pueda elegirlo.
+        "receta": ClaveModelo(entidad),
+        "variante": next(
+            (v for v in variantes if clave is not None and v.slug == clave.variante),
+            None,
+        ),
+        # Sobre qué datos responde el modelo: la interfaz lo rotula junto a él,
+        # porque es la otra mitad de la respuesta (mismo modelo sobre otra BD da
+        # otras recomendaciones).
+        "conjunto": _conjunto(clave) if clave is not None else None,
+        "nombres_conjunto": {
+            c.slug: c.nombre for c in _catalogo_datos().conjuntos()
+        },
         "clave": clave,
         "k": _k_pedido(),
         "etiqueta_entidad": config.ETIQUETA_ENTIDAD,
@@ -189,7 +242,7 @@ def _json_entidad(e: servicio.Entidad, entidad: str) -> dict[str, Any]:
     En el jugador se añade su trayectoria (equipos por liga, en orden
     cronológico), que también sale de la BD y va vacía sin ella.
     """
-    catalogo_ligas = current_app.extensions["ligas"]
+    catalogo_ligas = _fuentes().ligas()
     salida = {
         "id": e.id,
         "indice": e.indice,
@@ -251,14 +304,34 @@ def _json_rasgo(r: servicio.Rasgo) -> dict[str, Any]:
     }
 
 
+def _json_modelo(clave: ClaveModelo) -> dict[str, Any]:
+    """Con qué se ha respondido: el modelo elegido y de qué está hecho.
+
+    `variante` es lo que el usuario elige (y lo que se pasa como `?modelo=`);
+    `formulacion` y `normalizacion` van también porque son la receta con la que
+    se construyó, y quien consuma la API tiene derecho a saberla sin abrir el
+    artefacto.
+    """
+    catalogo = _catalogo()
+    try:
+        variante = catalogo.variante(clave.variante)
+        nombre, datos = variante.nombre, variante.datos
+    except ModeloNoDisponible:
+        nombre, datos = clave.variante, config.VARIANTE_BASE
+    return {
+        "entidad": clave.entidad,
+        "variante": clave.variante,
+        "nombre": nombre,
+        "datos": datos,
+        "formulacion": clave.formulacion,
+        "normalizacion": clave.normalizacion,
+    }
+
+
 def _json_recomendacion(rec: servicio.Recomendacion, clave: ClaveModelo) -> dict[str, Any]:
     entidad = clave.entidad
     return {
-        "modelo": {
-            "entidad": clave.entidad,
-            "formulacion": clave.formulacion,
-            "normalizacion": clave.normalizacion,
-        },
+        "modelo": _json_modelo(clave),
         "referencia": _json_entidad(rec.referencia, entidad),
         "perfil": _json_perfil(rec.perfil),
         "rasgos": [_json_rasgo(r) for r in rec.rasgos],
@@ -282,6 +355,8 @@ def _json_recomendacion(rec: servicio.Recomendacion, clave: ClaveModelo) -> dict
                         "candidato_cruda": co.candidato_cruda,
                         "texto_referencia": co.texto_referencia,
                         "texto_candidato": co.texto_candidato,
+                        "invertida": co.invertida,
+                        "fase": co.fase,
                     }
                     for co in c.coincidencias
                 ],
@@ -424,6 +499,31 @@ def ficha_equipo(entity_id: int):
     return _ficha("equipo", entity_id)
 
 
+@bp.get("/glosario")
+def glosario_metricas():
+    """Qué mide cada métrica, agrupada por entidad y fase de juego.
+
+    Deliberadamente NO usa `_contexto_base`: el glosario describe el catálogo de
+    métricas del pipeline, que no depende de qué modelos haya en disco ni de qué
+    conjunto de datos se esté sirviendo. Así se puede consultar también cuando la
+    app está recién instalada y todavía no hay nada construido, que es justo
+    cuando más falta hace saber qué significa cada cosa.
+    """
+    return render_template(
+        "glosario.html",
+        secciones=[
+            {
+                "entidad": entidad,
+                "etiqueta": config.ETIQUETA_PLURAL[entidad],
+                "unidad_conteo": UNIDAD_CONTEO.get(entidad, ""),
+                "bloques": glosario.glosario_de(entidad),
+            }
+            for entidad in config.ENTIDADES
+        ],
+        definicion_posicion=glosario.DEFINICION_POSICION,
+    )
+
+
 # --- API JSON -----------------------------------------------------------------
 
 @bp.get("/api/sugerencias")
@@ -500,11 +600,7 @@ def api_ficha(entidad: str, entity_id: int):
         crudos=_crudos(cargado),
     )
     salida = {
-        "modelo": {
-            "entidad": clave.entidad,
-            "formulacion": clave.formulacion,
-            "normalizacion": clave.normalizacion,
-        },
+        "modelo": _json_modelo(clave),
         "entidad": _json_entidad(detalle.entidad, entidad),
         "perfil": _json_perfil(detalle.perfil),
         "destacados": [_json_rasgo(r) for r in detalle.destacados],
@@ -541,9 +637,9 @@ def _peticion_invalida(e: PeticionInvalida):
 def _modelo_no_disponible(e: ModeloNoDisponible):
     if _es_api():
         return jsonify({"error": str(e)}), 503
-    # Si hay OTROS modelos, lo que falla es la combinación pedida (p. ej. se
-    # construyó la F5 pero no la F2): decirle al usuario que no hay nada sería
-    # falso, así que se muestra el error concreto sobre el buscador normal.
+    # Si hay OTROS modelos, lo que falla es el pedido (p. ej. un reentrenamiento
+    # que solo llegó a dejar el artefacto de jugador): decirle al usuario que no
+    # hay nada sería falso, así que se muestra el error concreto.
     if _catalogo().disponibles():
         return render_template("error.html", mensaje=str(e), **_contexto_minimo()), 503
     return render_template(
@@ -571,7 +667,11 @@ def _contexto_minimo() -> dict[str, Any]:
     return {
         "entidad": entidades[0] if entidades else config.ENTIDADES[0],
         "entidades": entidades,
-        "opciones": [],
+        "variantes": [],
+        "variante": None,
+        "conjunto": None,
+        "nombres_conjunto": {},
+        "receta": ClaveModelo(entidades[0] if entidades else config.ENTIDADES[0]),
         "clave": None,
         "k": config.TOP_K_DEFECTO,
         "etiqueta_entidad": config.ETIQUETA_ENTIDAD,

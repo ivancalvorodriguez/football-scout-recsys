@@ -15,14 +15,21 @@
   var oculto = formulario.querySelector("#id-entidad");
   var lista = formulario.querySelector("#sugerencias");
   var selectorEntidad = formulario.querySelector("#entidad");
+  var selectorModelo = formulario.querySelector("#modelo");
   var apiSugerencias = formulario.dataset.apiSugerencias;
 
   // Al cambiar jugador/equipo cambian los modelos disponibles y el universo de
   // nombres: se recarga el formulario en vez de mantener una selección inválida.
+  // El modelo elegido se arrastra (cada modelo trae las dos entidades); si el
+  // reentrenamiento aún no ha dejado la otra, el servidor lo dirá.
   if (selectorEntidad && selectorEntidad.dataset.recarga) {
     selectorEntidad.addEventListener("change", function () {
-      window.location = selectorEntidad.dataset.recarga +
+      var destino = selectorEntidad.dataset.recarga +
         "?entidad=" + encodeURIComponent(selectorEntidad.value);
+      if (selectorModelo && selectorModelo.value) {
+        destino += "&modelo=" + encodeURIComponent(selectorModelo.value);
+      }
+      window.location = destino;
     });
   }
 
@@ -40,10 +47,7 @@
     var p = new URLSearchParams();
     p.set("entidad", selectorEntidad ? selectorEntidad.value : "");
     p.set("q", texto);
-    var f = formulario.querySelector("#formulacion");
-    var n = formulario.querySelector("#normalizacion");
-    if (f && f.value) p.set("formulacion", f.value);
-    if (n && n.value) p.set("normalizacion", n.value);
+    if (selectorModelo && selectorModelo.value) p.set("modelo", selectorModelo.value);
     return p;
   }
 

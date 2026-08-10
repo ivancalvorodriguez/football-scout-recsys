@@ -2,7 +2,10 @@
   Reparto de minutos por posición sobre un campo de fútbol.
 
   Espera `marcas` (tuplas `contexto.MarcaCampo`) y, opcionalmente, `titulo`,
-  `nombre_a` y `nombre_b`. En cada posición se dibuja UN círculo, siempre del
+  `nombre_a`, `nombre_b` y `amplio`. `amplio` es para cuando la figura va sola en
+  su bloque (la ficha del jugador): igual que en `_radar.html`, entonces se centra
+  y se le deja mas ancho, en vez de quedar pegada a la izquierda con el hueco
+  vacio a la derecha. En cada posición se dibuja UN círculo, siempre del
   mismo tamaño: el círculo dice dónde se juega y los porcentajes escritos dentro
   dicen cuánto. Con `nombre_b` la figura compara a dos jugadores sobre la UNIÓN
   de sus posiciones, y dentro de cada círculo van los dos porcentajes, uno por
@@ -29,7 +32,7 @@
 #}
 {% if marcas %}
   {% set comparando = nombre_b is defined and nombre_b %}
-  <figure class="campo-juego"
+  <figure class="campo-juego {{ 'campo-amplio' if amplio }}"
           data-nombre-a="{{ nombre_a | default('', true) }}"
           {% if comparando %}data-nombre-b="{{ nombre_b }}"{% endif %}>
     {% if titulo %}<figcaption class="campo-titulo">{{ titulo }}</figcaption>{% endif %}

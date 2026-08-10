@@ -33,19 +33,79 @@ Modos de normalizacion:
   distintos (efecto mitigado por la ponderacion por minutos).
 
 Devuelve una `MatrizFeatures`: X (M x d, sin NaN), metadatos por fila
-(entity_id, entity_name, peso por minutos, liga) y los nombres de columna. NUNCA
-agrega filas por entidad: M filas entran y M filas salen.
+(entity_id, entity_name, peso por minutos, liga), los nombres de columna y las
+`EstadisticasNorm` (mu/sd) con las que se estandarizo. NUNCA agrega filas por
+entidad: M filas entran y M filas salen.
+
+Esas estadisticas se pueden CONGELAR y volver a pasar a `construir` al anadir
+datos nuevos (flujo incremental, `src.incremental`): sin congelarlas, meter una
+liga mas mueve la media/desviacion y, con ello, el vector de TODAS las
+observaciones antiguas, aunque sus conteos crudos no hayan cambiado.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 
 from . import config
 from .data import LEAGUE_KEY
+
+# Clave unica de `EstadisticasNorm` cuando la normalizacion es global (no hay
+# una clave por liga que usar).
+CLAVE_GLOBAL = "__global__"
+
+
+@dataclass
+class EstadisticasNorm:
+    """mu/sd por grupo con las que se hizo el z-score (una por liga, o una sola).
+
+    `mu`/`sd` van indexadas por clave de grupo (la `league_key` en `por_liga`,
+    `CLAVE_GLOBAL` en `global`) y cada valor es un vector alineado con
+    `columnas`. Es serializable a JSON tal cual, para viajar dentro del artefacto
+    del modelo y poder reestandarizar datos nuevos EN EL MISMO espacio.
+    """
+
+    normalizacion: str
+    columnas: list[str] = field(default_factory=list)
+    mu: dict[str, list[float]] = field(default_factory=dict)
+    sd: dict[str, list[float]] = field(default_factory=dict)
+
+    def como_dict(self) -> dict:
+        return {
+            "normalizacion": self.normalizacion,
+            "columnas": list(self.columnas),
+            "mu": {k: [float(x) for x in v] for k, v in self.mu.items()},
+            "sd": {k: [float(x) for x in v] for k, v in self.sd.items()},
+        }
+
+    @classmethod
+    def desde_dict(cls, datos: dict | None) -> "EstadisticasNorm | None":
+        if not datos:
+            return None
+        return cls(
+            normalizacion=str(datos["normalizacion"]),
+            columnas=list(datos.get("columnas", [])),
+            mu={str(k): list(v) for k, v in (datos.get("mu") or {}).items()},
+            sd={str(k): list(v) for k, v in (datos.get("sd") or {}).items()},
+        )
+
+    def _serie(self, tabla: dict[str, list[float]], clave: str,
+               columnas: pd.Index) -> pd.Series:
+        """Vector guardado para `clave`, realineado a `columnas` (NaN si falta)."""
+        valores = tabla.get(clave)
+        if valores is None or not self.columnas:
+            return pd.Series(np.nan, index=columnas, dtype=float)
+        serie = pd.Series(list(valores), index=list(self.columnas), dtype=float)
+        return serie.reindex(columnas)
+
+    def serie_mu(self, clave: str, columnas: pd.Index) -> pd.Series:
+        return self._serie(self.mu, clave, columnas)
+
+    def serie_sd(self, clave: str, columnas: pd.Index) -> pd.Series:
+        return self._serie(self.sd, clave, columnas)
 
 
 @dataclass
@@ -58,6 +118,8 @@ class MatrizFeatures:
     entity_name: np.ndarray  # (M,) nombre de la entidad de cada fila
     weight: np.ndarray       # (M,) masa de la observacion (minutos/90 o 1.0)
     league: np.ndarray       # (M,) clave de liga de cada fila
+    match_id: np.ndarray | None = None        # (M,) partido de cada fila
+    estadisticas: EstadisticasNorm | None = None  # mu/sd usadas en el z-score
 
 
 def _safe_ratio(num: pd.Series, den: pd.Series) -> pd.Series:
@@ -119,29 +181,70 @@ def _derivar_equipo(df: pd.DataFrame) -> pd.DataFrame:
     return feats
 
 
-def _zscore_por_liga(feats: pd.DataFrame, league: pd.Series) -> pd.DataFrame:
+def _mu_sd(g: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """mu/sd de un bloque de filas (nanmean/nanstd, ddof=0).
+
+    Std 0 (feature constante en el bloque) -> 1 para no dividir por cero. Una
+    columna entera a NaN da mu NaN -> 0: sus filas son NaN igualmente y acaban en
+    0 tras el `nan_to_num`, asi que el resultado no cambia y las estadisticas
+    quedan serializables (sin NaN).
+    """
+    mu = g.mean(skipna=True).fillna(0.0)
+    sd = g.std(skipna=True, ddof=0).replace(0.0, 1.0).fillna(1.0)
+    return mu, sd
+
+
+def _mu_sd_con_previas(
+    g: pd.DataFrame, previas: EstadisticasNorm | None, clave: str
+) -> tuple[pd.Series, pd.Series]:
+    """mu/sd del bloque, dando prioridad a las CONGELADAS de `previas`.
+
+    Lo que `previas` no cubra (una liga que no existia, una feature nueva) se
+    calcula del propio bloque: es lo unico que se puede hacer, y coincide con lo
+    que haria un ajuste en frio para esos casos.
+    """
+    mu, sd = _mu_sd(g)
+    if previas is None:
+        return mu, sd
+    return (
+        previas.serie_mu(clave, g.columns).combine_first(mu),
+        previas.serie_sd(clave, g.columns).combine_first(sd),
+    )
+
+
+def _zscore_por_liga(
+    feats: pd.DataFrame, league: pd.Series, previas: EstadisticasNorm | None = None
+) -> tuple[pd.DataFrame, EstadisticasNorm]:
     """Estandariza cada feature dentro de su liga (nanmean/nanstd, ddof=0).
 
-    Std 0 (feature constante en la liga) -> 1 para no dividir por cero. Los NaN
-    (ratios sin definir) se mantienen aqui y se rellenan a 0 despues.
+    Los NaN (ratios sin definir) se mantienen aqui y se rellenan a 0 despues.
+    Devuelve tambien las mu/sd por liga efectivamente aplicadas.
     """
-    def z(g: pd.DataFrame) -> pd.DataFrame:
-        mu = g.mean(skipna=True)
-        sd = g.std(skipna=True, ddof=0).replace(0.0, 1.0).fillna(1.0)
-        return (g - mu) / sd
+    stats = EstadisticasNorm("por_liga", columnas=list(feats.columns))
+    salida = pd.DataFrame(np.nan, index=feats.index, columns=feats.columns, dtype=float)
+    for clave, filas in feats.groupby(league, sort=False).groups.items():
+        bloque = feats.loc[filas]
+        mu, sd = _mu_sd_con_previas(bloque, previas, str(clave))
+        salida.loc[filas] = ((bloque - mu) / sd).to_numpy()
+        stats.mu[str(clave)] = mu.tolist()
+        stats.sd[str(clave)] = sd.tolist()
+    return salida, stats
 
-    return feats.groupby(league, group_keys=False).apply(z)
 
-
-def _zscore_global(feats: pd.DataFrame) -> pd.DataFrame:
+def _zscore_global(
+    feats: pd.DataFrame, previas: EstadisticasNorm | None = None
+) -> tuple[pd.DataFrame, EstadisticasNorm]:
     """Estandariza cada feature con la media/std de TODO el dataset (sin agrupar).
 
     Misma convencion que ``_zscore_por_liga``: std 0 -> 1, NaN se conservan.
     Habilita comparacion inter-liga a costa de mezclar ligas heterogeneas.
     """
-    mu = feats.mean(skipna=True)
-    sd = feats.std(skipna=True, ddof=0).replace(0.0, 1.0).fillna(1.0)
-    return (feats - mu) / sd
+    mu, sd = _mu_sd_con_previas(feats, previas, CLAVE_GLOBAL)
+    stats = EstadisticasNorm(
+        "global", columnas=list(feats.columns),
+        mu={CLAVE_GLOBAL: mu.tolist()}, sd={CLAVE_GLOBAL: sd.tolist()},
+    )
+    return (feats - mu) / sd, stats
 
 
 # Modos validos de normalizacion (los que `construir` acepta).
@@ -232,13 +335,24 @@ def masa(df: pd.DataFrame, entidad: str) -> np.ndarray:
 
 
 def construir(
-    df: pd.DataFrame, entidad: str, normalizacion: str = "por_liga"
+    df: pd.DataFrame,
+    entidad: str,
+    normalizacion: str = "por_liga",
+    estadisticas: EstadisticasNorm | None = None,
 ) -> MatrizFeatures:
     """Construye la matriz de features por-partido para una entidad.
 
     ``normalizacion``:
     - ``"por_liga"`` (default): z-score por (competition_id, season_id).
     - ``"global"``: z-score sobre todo el dataset (mezclando ligas).
+
+    ``estadisticas``: mu/sd CONGELADAS de un ajuste anterior (las que devuelve
+    esta misma funcion en ``mf.estadisticas``). Con ellas, anadir datos nuevos no
+    mueve el vector de las observaciones que ya estaban — condicion para que el
+    reentrenamiento incremental pueda reaprovechar el ajuste previo y para que
+    las recomendaciones antiguas no cambien por debajo sin motivo. Lo que no
+    cubran (liga nueva, feature nueva) se calcula del dato. None = recalcular
+    todo, el comportamiento de un ajuste en frio.
     """
     if normalizacion not in NORMALIZACIONES_VALIDAS:
         raise ValueError(
@@ -261,10 +375,15 @@ def construir(
 
     feat_names = list(feats.columns)
     league = df[LEAGUE_KEY]
+    if estadisticas is not None and estadisticas.normalizacion != normalizacion:
+        raise ValueError(
+            f"las estadisticas congeladas son de normalizacion "
+            f"{estadisticas.normalizacion!r} y se pidio {normalizacion!r}"
+        )
     if normalizacion == "por_liga":
-        feats_z = _zscore_por_liga(feats, league)
+        feats_z, stats = _zscore_por_liga(feats, league, estadisticas)
     else:  # "global"
-        feats_z = _zscore_global(feats)
+        feats_z, stats = _zscore_global(feats, estadisticas)
     # NaN restantes (ratios sin denominador) -> 0 = media estandarizada.
     X = feats_z[feat_names].to_numpy(dtype=float)
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
@@ -298,4 +417,9 @@ def construir(
         entity_name=df["entity_name"].to_numpy().astype(str),
         weight=weight,
         league=league.to_numpy().astype(str),
+        # El partido identifica la observacion dentro de la entidad: es la clave
+        # con la que el reentrenamiento incremental empareja las filas de esta X
+        # con las del ajuste anterior. Puede faltar en un df construido a mano.
+        match_id=(df["match_id"].to_numpy() if "match_id" in df.columns else None),
+        estadisticas=stats,
     )

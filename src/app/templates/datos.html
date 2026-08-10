@@ -1,0 +1,309 @@
+{% extends "base.html" %}
+
+{% block titulo %}Datos y modelos · Scouting por similitud{% endblock %}
+
+{% block contenido %}
+  {% if error %}
+    <p class="aviso">{{ error }}</p>
+  {% endif %}
+
+  <section class="panel">
+    <h1>Datos y modelos</h1>
+    <p class="ayuda">
+      Incorpora partidos nuevos a la base de datos y entrena con ellos un modelo
+      nuevo, para que los jugadores y equipos que aparecen entren en las
+      recomendaciones: tanto recibiendo las suyas como apareciendo entre las de los
+      que ya estaban. Cada modelo entrenado se guarda con su nombre y se puede
+      elegir después en el buscador.
+    </p>
+
+    <div class="rejilla-estado">
+      <article class="tarjeta-estado">
+        <h2>Conjuntos de datos</h2>
+        <ul class="lista-modelos">
+          {% for d in datos %}
+            <li>
+              <span class="etiqueta-modelo">{{ d.conjunto.nombre }}</span>
+              <span class="apunte">
+                {{- ' de fábrica' if d.conjunto.es_base else ' creado añadiendo partidos' }}
+                {%- if d.conjunto.fecha %} · {{ d.conjunto.fecha.strftime("%d/%m/%Y %H:%M") }}{% endif %}
+              </span>
+              {% if d.bd %}
+                <p class="cifras">
+                  <span><strong>{{ d.bd.partidos }}</strong> partidos</span>
+                  <span><strong>{{ d.bd.jugadores }}</strong> jugadores</span>
+                  <span><strong>{{ d.bd.equipos }}</strong> equipos</span>
+                </p>
+                <ul class="lista-ligas">
+                  {% for liga in d.bd.ligas %}
+                    <li>{{ liga.competicion }} <span class="apunte">{{ liga.temporada }} ·
+                      {{ liga.partidos }} partidos</span></li>
+                  {% endfor %}
+                </ul>
+              {% elif d.conjunto.es_base %}
+                <p class="apunte">
+                  No hay base de datos en <code>{{ ruta_bd }}</code>. Extráela con
+                  <code>python -m src.extraccion.extract</code>.
+                </p>
+              {% else %}
+                <p class="aviso aviso-menor">
+                  Todavía sin base de datos: la incorporación no ha terminado
+                  (o no llegó a terminar).
+                </p>
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      </article>
+
+      <article class="tarjeta-estado">
+        <h2>Modelos</h2>
+        {% if modelos %}
+          <ul class="lista-modelos">
+            {% for m in modelos %}
+              <li>
+                <span class="etiqueta-modelo">{{ m.variante.nombre }}</span>
+                <span class="apunte">
+                  {{- ' modelo de fábrica' if m.variante.es_base else ' reentrenado' }}
+                  · datos: {{ nombres_conjunto.get(m.variante.datos, m.variante.datos) }}
+                </span>
+                {% if m.artefactos %}
+                  <ul class="lista-artefactos">
+                    {% for a in m.artefactos %}
+                      <li class="apunte">
+                        {{ etiqueta_entidad[a.clave.entidad] }} ·
+                        F{{ a.clave.formulacion }} ·
+                        {{ etiqueta_normalizacion[a.clave.normalizacion] }}
+                        {% if a.fecha %}· {{ a.fecha.strftime("%d/%m/%Y %H:%M") }}{% endif %}
+                      </li>
+                    {% endfor %}
+                  </ul>
+                {% else %}
+                  <p class="aviso aviso-menor">
+                    Todavía sin artefactos: el entrenamiento no ha terminado
+                    (o no llegó a terminar).
+                  </p>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+          <p class="apunte">
+            Si la fecha de un modelo es anterior a la última incorporación, todavía
+            no conoce a los jugadores nuevos: entrena uno nuevo abajo.
+          </p>
+        {% else %}
+          <p class="apunte">No hay modelos en <code>{{ model_dir }}</code>.</p>
+        {% endif %}
+      </article>
+    </div>
+  </section>
+
+  <section class="panel" id="tarea" data-url="{{ url_for('datos.tarea') }}"
+           {% if tarea %}data-activa="{{ 1 if tarea.estado == 'en_curso' else 0 }}"{% endif %}>
+    <h2>Tarea</h2>
+    {% if tarea %}
+      <div class="tarea-cabecera">
+        <span class="tarea-titulo">{{ tarea.titulo }}</span>
+        <span class="tarea-estado estado-{{ tarea.estado }}">{{ tarea.estado }}</span>
+        <span class="apunte tarea-tiempo">{{ tarea.segundos | round(1) }} s</span>
+      </div>
+      <div class="barra"><div class="barra-relleno"
+        style="width: {{ ((tarea.progreso or 0) * 100) | round(1) }}%"></div></div>
+      <p class="apunte tarea-paso">{{ tarea.paso }}</p>
+      <pre class="comandos tarea-log">{{ tarea.lineas | join("\n") }}</pre>
+      {# `comando` es la lista de argumentos; se une igual que en `Tarea.como_dict`,
+         que es lo que reescribe el JS mientras la tarea corre. #}
+      <p class="apunte">Comando:
+        <code class="tarea-comando">{{ tarea.comando | join(" ") }}</code></p>
+    {% else %}
+      <p class="apunte">No se ha lanzado ninguna tarea todavía.</p>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>Añadir partidos</h2>
+    <p class="ayuda">
+      El paquete es una carpeta con el formato de StatsBomb Open Data
+      (<code>competitions.json</code>, <code>matches/</code>, <code>events/</code>,
+      <code>lineups/</code>). Los campos exigidos están en <code>docs/incremental.md</code>.
+      Reprocesar un partido que ya estaba lo actualiza, no lo duplica.
+    </p>
+    <p class="ayuda">
+      El resultado es un <strong>conjunto de datos nuevo</strong>: se copia el que
+      elijas, se incorporan los partidos sobre la copia y el original queda intacto,
+      con sus modelos todavía válidos. Después hay que entrenar un modelo sobre él
+      para que los jugadores nuevos entren en las recomendaciones.
+    </p>
+    <form class="formulario" method="post" action="{{ url_for('datos.ingerir') }}">
+      {# Se rellenan con lo último enviado: el flujo natural es validar y, con lo
+         mismo, incorporar, y la redirección posterior vaciaría el formulario. #}
+      <div class="campo campo-ancho">
+        <label for="paquete">Carpeta del paquete</label>
+        <div class="campo-con-boton">
+          <input type="text" id="paquete" name="paquete" required
+                 value="{{ enviado.paquete or paquete_defecto }}">
+          {# Se puede seguir escribiendo la ruta a mano: el explorador es un
+             atajo, y sin JS el formulario funciona igual que antes. #}
+          <button type="button" class="boton boton-secundario" id="abrir-explorador"
+                  data-url="{{ url_for('datos.carpetas') }}"
+                  data-destino="paquete">Examinar…</button>
+        </div>
+      </div>
+      <div class="campo">
+        <label for="competicion">Competición <span class="apunte">(opcional)</span></label>
+        <input type="text" id="competicion" name="competicion" placeholder="1. Bundesliga"
+               value="{{ enviado.competicion }}">
+      </div>
+      <div class="campo">
+        <label for="temporada">Temporada <span class="apunte">(opcional)</span></label>
+        <input type="text" id="temporada" name="temporada" placeholder="2015/2016"
+               value="{{ enviado.temporada }}">
+      </div>
+      <div class="campo campo-ancho">
+        <label for="partidos">Partidos concretos <span class="apunte">(opcional, ids separados por comas)</span></label>
+        <input type="text" id="partidos" name="partidos" placeholder="3890561, 3890505"
+               value="{{ enviado.partidos }}">
+      </div>
+      <div class="campo campo-ancho">
+        <label for="nombre_datos">Nombre del conjunto de datos que se creará</label>
+        <input type="text" id="nombre_datos" name="nombre_datos" required
+               maxlength="60" placeholder="Ej.: Con la Bundesliga 15/16"
+               value="{{ enviado_nombre_datos }}">
+      </div>
+      {# Con un solo conjunto no hay nada que elegir: se parte de él. #}
+      {% if conjuntos | length > 1 %}
+        <div class="campo campo-ancho">
+          <label for="datos_origen">Conjunto del que partir</label>
+          <select id="datos_origen" name="datos_origen">
+            {% for c in conjuntos %}
+              <option value="{{ c.slug }}">
+                {{ c.nombre }}{{ ' (de fábrica)' if c.es_base else '' }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+      {% elif conjuntos %}
+        <input type="hidden" name="datos_origen" value="{{ conjuntos[0].slug }}">
+        <p class="apunte">
+          Parte de <strong>{{ conjuntos[0].nombre }}</strong>, el único conjunto de
+          datos que hay.
+        </p>
+      {% endif %}
+      <label class="casilla">
+        <input type="checkbox" name="omitir_invalidos">
+        Procesar los partidos válidos aunque otros tengan errores
+      </label>
+      <div class="botonera">
+        {# «Solo validar» no escribe nada, así que no necesita nombre: el campo se
+           desactiva desde el propio botón con `formnovalidate`. #}
+        <button class="boton boton-secundario" type="submit" formnovalidate
+                formaction="{{ url_for('datos.validar') }}">Solo validar</button>
+        <button class="boton" type="submit" {{ 'disabled' if not conjuntos }}>
+          Crear el conjunto de datos
+        </button>
+      </div>
+      {% if not conjuntos %}
+        <p class="apunte">
+          Hace falta una base de datos de partida: extráela con
+          <code>python -m src.extraccion.extract</code>.
+        </p>
+      {% endif %}
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>Entrenar un modelo nuevo</h2>
+    <p class="ayuda">
+      Reconstruye los dos artefactos —jugadores y equipos— sobre toda la base de
+      datos, reaprovechando el ajuste del modelo del que parte (<em>warm start</em>)
+      en vez de empezar de cero. El modelo de origen no se toca: el resultado se
+      guarda aparte con el nombre que le pongas y desde ese momento se puede elegir
+      en el buscador. Puede tardar.
+    </p>
+    <form class="formulario" method="post" action="{{ url_for('datos.reentrenar') }}">
+      <div class="campo campo-ancho">
+        <label for="nombre">Nombre del modelo</label>
+        <input type="text" id="nombre" name="nombre" required
+               maxlength="60" placeholder="Ej.: Con la Bundesliga 15/16"
+               value="{{ enviado_nombre }}">
+      </div>
+      {# Con un solo modelo entrenado no hay nada que elegir: se parte de él y
+         no se pregunta. El desplegable aparece en cuanto hay al menos dos. #}
+      {% if origenes | length > 1 %}
+        <div class="campo campo-ancho">
+          <label for="origen">Modelo del que partir</label>
+          <select id="origen" name="origen">
+            {% for v in origenes %}
+              <option value="{{ v.slug }}">
+                {{ v.nombre }}{{ ' (de fábrica)' if v.es_base else '' }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+      {% elif origenes %}
+        <input type="hidden" name="origen" value="{{ origenes[0].slug }}">
+        <p class="apunte">
+          Parte de <strong>{{ origenes[0].nombre }}</strong>, el único modelo
+          entrenado.
+        </p>
+      {% endif %}
+      {# Sobre qué datos. Es la otra mitad de la identidad del modelo: el mismo
+         ajuste sobre otro conjunto da otras recomendaciones. #}
+      {% if conjuntos | length > 1 %}
+        <div class="campo campo-ancho">
+          <label for="datos_origen_modelo">Conjunto de datos sobre el que entrenar</label>
+          <select id="datos_origen_modelo" name="datos_origen">
+            {% for c in conjuntos %}
+              <option value="{{ c.slug }}" {{ 'selected' if loop.last }}>
+                {{ c.nombre }}{{ ' (de fábrica)' if c.es_base else '' }}
+              </option>
+            {% endfor %}
+          </select>
+          <p class="apunte">
+            Se propone el más reciente, que es el que trae los partidos recién
+            incorporados.
+          </p>
+        </div>
+      {% elif conjuntos %}
+        <input type="hidden" name="datos_origen" value="{{ conjuntos[0].slug }}">
+      {% endif %}
+      <div class="botonera">
+        <button class="boton" type="submit"
+                {{ 'disabled' if not origenes or not conjuntos }}>
+          Entrenar
+        </button>
+      </div>
+      {% if not origenes %}
+        <p class="apunte">
+          Hace falta un modelo de partida: constrúyelo con
+          <code>python -m src.similitud.build</code>.
+        </p>
+      {% endif %}
+    </form>
+  </section>
+
+  {# Explorador de carpetas del servidor. Vive fuera de los formularios (un
+     <form> dentro de otro no es HTML válido) y solo lo abre el JS. #}
+  <div class="explorador" id="explorador" hidden>
+    <div class="explorador-caja" role="dialog" aria-modal="true"
+         aria-labelledby="explorador-titulo">
+      <h2 id="explorador-titulo">Elegir carpeta</h2>
+      <p class="apunte explorador-ruta"></p>
+      <div class="explorador-unidades"></div>
+      <ul class="explorador-lista"></ul>
+      <p class="aviso explorador-error" hidden></p>
+      <div class="botonera">
+        <button type="button" class="boton boton-secundario"
+                data-accion="cancelar">Cancelar</button>
+        <button type="button" class="boton" data-accion="elegir">
+          Elegir esta carpeta
+        </button>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+  <script src="{{ url_for('static', filename='tareas.js') }}"></script>
+  <script src="{{ url_for('static', filename='explorador.js') }}"></script>
+{% endblock %}

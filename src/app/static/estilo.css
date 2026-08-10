@@ -286,6 +286,21 @@ code, pre { font-family: "Cascadia Mono", Consolas, "Courier New", monospace; }
 .coincidencias th:first-child, .coincidencias td:first-child { width: 44%; }
 .coincidencias th:not(:first-child), .coincidencias td:not(:first-child) { width: 28%; }
 
+/* Con la columna de fase son CUATRO columnas y el reparto de arriba se pasa del
+   100 %: se rehace entero. La fase es la mas estrecha (cabe el rotulo mas largo,
+   «Finalizacion») y las dos entidades siguen simetricas entre si. */
+.con-fase th:first-child, .con-fase td:first-child { width: 34%; }
+.con-fase th:nth-child(2), .con-fase td:nth-child(2) { width: 18%; }
+.con-fase th:nth-child(n+3), .con-fase td:nth-child(n+3) { width: 24%; }
+
+/* La fase es contexto de la metrica, no un dato que comparar entre las dos
+   entidades: va alineada a la izquierda como el nombre al que acompaña, y no
+   centrada como las columnas de valores. */
+.con-fase th:nth-child(2), .celda-fase { text-align: left; }
+
+/* El color del z-score va por CALIDAD, no por signo: en las metricas invertidas
+   (menos es mejor) un z positivo lleva `.z-bajo` y uno negativo `.z-alto`. La
+   clase la decide `servicio.clase_z`, no la plantilla. */
 .z { font-variant-numeric: tabular-nums; }
 .z-alto { color: var(--alto); }
 .z-bajo { color: var(--bajo); }
@@ -334,9 +349,11 @@ code, pre { font-family: "Cascadia Mono", Consolas, "Courier New", monospace; }
 
 .radar svg, .campo-juego svg { width: 100%; height: auto; display: block; }
 
-/* Radar sin nada al lado (fichas, y resultados de equipo, que no tienen campo de
-   posiciones): ocupa mas y se centra en vez de dejar el hueco a la derecha. */
-.radar-amplio {
+/* Figura sin nada al lado (la ficha, y los resultados de equipo, que no tienen
+   campo de posiciones): ocupa mas y se centra en vez de dejar el hueco a la
+   derecha. Mismo ancho para el radar y para el campo, que en la ficha van uno
+   debajo del otro y descuadraba que cada bloque empezase a una anchura. */
+.radar-amplio, .campo-amplio {
   max-width: 32rem;
   margin-left: auto;
   margin-right: auto;
@@ -653,6 +670,289 @@ code, pre { font-family: "Cascadia Mono", Consolas, "Courier New", monospace; }
 
 .lista-candidatos a { color: var(--acento); font-weight: 500; }
 
+/* --- Navegacion ----------------------------------------------------------- */
+
+.navegacion {
+  display: flex;
+  gap: 1rem;
+  margin-top: 0.5rem;
+}
+
+/* Va dentro de `.cabecera`, que es de fondo oscuro: el color tiene que salir de
+   la paleta clara (como `.lema`), no de `--tinta-suave`. */
+.navegacion a {
+  color: #b9c7c0;
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+  padding-bottom: 0.15rem;
+  border-bottom: 2px solid transparent;
+}
+
+.navegacion a:hover { color: #fff; border-bottom-color: #fff; }
+
+/* --- Datos y modelos ------------------------------------------------------ */
+
+.rejilla-estado {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 1rem;
+}
+
+.tarjeta-estado {
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+  padding: 0.8rem 1rem;
+}
+
+.tarjeta-estado h2 { margin-top: 0; }
+
+.cifras {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  margin: 0 0 0.6rem;
+  font-size: 0.95rem;
+}
+
+.cifras strong { font-size: 1.15rem; color: var(--acento); }
+
+.lista-ligas, .lista-modelos { list-style: none; padding: 0; margin: 0; }
+.lista-ligas li, .lista-modelos li { padding: 0.15rem 0; font-size: 0.9rem; }
+
+/* Los dos artefactos (jugador y equipo) de un modelo, colgando de su nombre. */
+.lista-artefactos {
+  list-style: none;
+  margin: 0.1rem 0 0.4rem;
+  padding: 0 0 0 0.9rem;
+  border-left: 2px solid var(--borde);
+}
+
+.lista-artefactos li { padding: 0.05rem 0; font-size: 0.85rem; }
+
+/* Aviso dentro de una tarjeta: mismo color, sin robarle el sitio al contenido. */
+.aviso-menor { font-size: 0.85rem; padding: 0.3rem 0.5rem; margin: 0.2rem 0 0.4rem; }
+
+/* Campo de texto con un botón pegado (la ruta y su «Examinar…»). */
+.campo-con-boton { display: flex; gap: 0.4rem; }
+.campo-con-boton input { flex: 1 1 auto; min-width: 0; }
+.campo-con-boton .boton { flex: 0 0 auto; white-space: nowrap; }
+
+/* --- Explorador de carpetas ----------------------------------------------- */
+
+.explorador {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 30, 25, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 20;
+}
+
+.explorador[hidden] { display: none; }
+
+.explorador-caja {
+  background: #fff;
+  border-radius: var(--radio);
+  padding: 1rem 1.2rem;
+  width: min(38rem, 100%);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.explorador-caja h2 { margin: 0 0 0.3rem; }
+
+/* La ruta puede ser larguísima y no debe ensanchar el diálogo. */
+.explorador-ruta {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  word-break: break-all;
+  margin: 0 0 0.5rem;
+}
+
+.explorador-unidades { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.5rem; }
+
+.explorador-unidad {
+  font-size: 0.8rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--borde);
+  border-radius: 4px;
+  background: var(--fondo);
+  cursor: pointer;
+}
+
+.explorador-unidad:hover { border-color: var(--acento); color: var(--acento); }
+
+.explorador-lista {
+  list-style: none;
+  margin: 0 0 0.6rem;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  border: 1px solid var(--borde);
+  border-radius: 4px;
+}
+
+.explorador-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0.35rem 0.6rem;
+  font: inherit;
+  font-size: 0.9rem;
+  color: inherit;
+  cursor: pointer;
+}
+
+.explorador-item:hover { background: var(--acento-claro); color: var(--acento); }
+
+.explorador-ok {
+  padding: 0.35rem 0.6rem;
+  font-size: 0.85rem;
+  color: var(--acento);
+  background: var(--acento-claro);
+}
+
+.formulario {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem 1rem;
+  align-items: flex-end;
+}
+
+.formulario .campo { flex: 1 1 12rem; }
+/* Con la especificidad de `.formulario .campo` no basta `.campo-ancho`: sin este
+   selector, el campo se quedaba compartiendo fila y una ruta larga no cabia. */
+.formulario .campo-ancho, .campo-ancho { flex-basis: 100%; }
+
+.casilla {
+  flex-basis: 100%;
+  display: flex;
+  gap: 0.45rem;
+  align-items: flex-start;
+  font-size: 0.9rem;
+  color: var(--tinta-suave);
+}
+
+.botonera { flex-basis: 100%; display: flex; gap: 0.6rem; }
+
+.boton-secundario {
+  background: transparent;
+  color: var(--acento);
+  border: 1px solid var(--acento);
+}
+
+.boton-secundario:hover { background: var(--acento-claro); }
+
+/* --- Tarea en curso ------------------------------------------------------- */
+
+.tarea-cabecera {
+  display: flex;
+  gap: 0.7rem;
+  align-items: baseline;
+  margin-bottom: 0.5rem;
+}
+
+.tarea-titulo { font-weight: 600; }
+
+.tarea-estado {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-radius: 4px;
+  padding: 0.05rem 0.45rem;
+}
+
+.estado-en_curso { background: var(--aviso-fondo); color: var(--aviso); }
+.estado-terminada { background: var(--acento-claro); color: var(--acento); }
+.estado-fallida { background: #fbe9e5; color: var(--bajo); }
+
+.barra {
+  height: 6px;
+  background: var(--borde);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 0.4rem;
+}
+
+.barra-relleno {
+  height: 100%;
+  background: var(--acento);
+  transition: width 0.4s ease;
+}
+
+.tarea-log {
+  max-height: 18rem;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  margin: 0.5rem 0;
+}
+
+/* --- Glosario ------------------------------------------------------------- */
+
+/* Indice de fases de la cabecera: enlaces sueltos separados por puntos, no una
+   lista, porque son catorce y en vertical ocuparian mas que la primera fase. */
+.indice-glosario { margin: 0.8rem 0 0; }
+
+.indice-entidad {
+  margin: 0.25rem 0;
+  font-size: 0.88rem;
+  line-height: 1.7;
+  color: var(--tinta-suave);
+}
+
+.indice-titulo { font-weight: 600; color: var(--tinta); }
+.indice-entidad a { color: var(--acento); text-decoration: none; }
+.indice-entidad a:hover { text-decoration: underline; }
+
+.fase-glosario {
+  border-top: 1px solid var(--borde);
+  padding-top: 0.9rem;
+  margin-top: 0.9rem;
+  /* Al llegar desde el indice, el titulo no se pega al borde de la ventana. */
+  scroll-margin-top: 0.8rem;
+}
+
+.fase-glosario:first-of-type { border-top: 0; padding-top: 0; margin-top: 0.4rem; }
+
+.titulo-fase {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--acento);
+}
+
+/* Dos columnas en pantalla ancha: las definiciones son cortas y en una sola
+   columna la pagina se hace larguisima (80 metricas). Los items del grid son los
+   `.termino`, no los `dt`/`dd` sueltos: si no, el navegador podria dejar un
+   termino al final de una columna y su definicion al principio de la siguiente. */
+.terminos {
+  margin: 0.6rem 0 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  gap: 0.55rem 1.6rem;
+  align-items: start;
+}
+
+.terminos dt {
+  font-weight: 600;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: baseline;
+}
+
+.terminos dd {
+  margin: 0.15rem 0 0;
+  color: var(--tinta-suave);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
 /* --- Movil --------------------------------------------------------------- */
 
 @media (max-width: 40rem) {
@@ -662,4 +962,6 @@ code, pre { font-family: "Cascadia Mono", Consolas, "Courier New", monospace; }
   .coincidencias { display: block; overflow-x: auto; }
   .explicacion { flex-direction: column; }
   .radar, .campo-juego { max-width: 100%; }
+  .formulario { flex-direction: column; align-items: stretch; }
+  .botonera { flex-direction: column; }
 }

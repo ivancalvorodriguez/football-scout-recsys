@@ -15,7 +15,8 @@
   una columna entera de guiones.
 
   Las métricas en las que subir es empeorar se marcan con una flecha, para que un
-  valor alto no se lea como algo bueno.
+  valor alto no se lea como algo bueno; el color del z-score (`clase_z`) también
+  va por calidad y no por signo, así que ahí un +1,50 sale en rojo.
 #}
 
 {% macro tabla_rasgos(rasgos, con_valor=true) %}
@@ -43,7 +44,7 @@
             </td>
             <td class="apunte">{{ r.fase or '—' }}</td>
             {% if con_valor %}<td class="z valor-real">{{ r.texto }}</td>{% endif %}
-            <td class="z {{ 'z-secundario' if con_valor }} {{ 'z-alto' if r.valor >= 0 else 'z-bajo' }}">
+            <td class="z {{ 'z-secundario' if con_valor }} {{ r.clase_z }}">
               {{ '%+.2f' % r.valor }}
             </td>
           </tr>

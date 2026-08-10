@@ -72,9 +72,12 @@ _POR_FORMULACION: dict[str, tuple[str, ...]] = {
 _METODO_F5 = {"jugador": "F5_METODO_JUGADOR", "equipo": "F5_METODO_EQUIPO"}
 
 # Atributos que NO influyen en el artefacto: rutas por defecto, parametros de
-# consulta y el catalogo del que ya se deriva POSITION_FEATURES.
+# consulta, el catalogo del que ya se deriva POSITION_FEATURES y la eleccion de
+# que combinacion SIRVE la app (MODELOS_SERVIBLES), que no entra en el ajuste:
+# selecciona entre artefactos ya construidos, cada uno con su propia huella.
 _IRRELEVANTES = frozenset({
     "DEFAULT_DB_PATH", "DEFAULT_MODEL_DIR", "DEFAULT_TOP_K", "POSITIONS_25",
+    "MODELOS_SERVIBLES",
 })
 
 # --------------------------------------------------------------------------- #
@@ -82,7 +85,11 @@ _IRRELEVANTES = frozenset({
 # --------------------------------------------------------------------------- #
 # `config.py` se excluye a proposito (ver docstring del modulo).
 
-_CODIGO_COMUN = ("features.py", "data.py", "modelo.py")
+# `warm.py` entra aunque un ajuste EN FRIO (el que hace el barrido) no reutilice
+# nada: lo llaman las dos formulaciones, y si un cambio ahi hiciera que se diera
+# por reutilizable algo que no lo es, la S cambiaria. Preferimos invalidar la
+# cache de mas a servir un modelo construido con otro codigo.
+_CODIGO_COMUN = ("features.py", "data.py", "modelo.py", "warm.py")
 _CODIGO_POR_FORMULACION: dict[str, tuple[str, ...]] = {
     # formulacion5 usa `slim` para el EASE, asi que slim.py entra en las dos.
     "2": ("formulacion2.py", "slim.py"),

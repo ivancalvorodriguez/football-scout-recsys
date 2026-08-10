@@ -1,11 +1,27 @@
-"""Rótulos y unidades de las métricas."""
+"""Rótulos, unidades y definiciones de las métricas."""
 
 from __future__ import annotations
 
 import pytest
 
+from src.app import fases as cat_fases
 from src.app import glosario
 from src.similitud import config as config_similitud
+
+
+def _features_del_pipeline() -> set[str]:
+    """Todas las columnas de métrica que construye `similitud.features` (sin `pos_*`)."""
+    c = config_similitud
+    derivadas = (
+        {n for n, _, _ in c.PLAYER_RATIO_FEATURES}
+        | {n for n, _, _ in c.TEAM_RATIO_FEATURES}
+        | {n for n, _, _ in c.PLAYER_DIFF_FEATURES}
+        | {n for n, _, _ in c.TEAM_DIFF_FEATURES}
+    )
+    return (
+        set(c.PLAYER_COUNT_FEATURES) | set(c.TEAM_COUNT_FEATURES)
+        | set(c.TEAM_RATE_FEATURES) | derivadas
+    )
 
 
 class TestEtiqueta:
@@ -20,18 +36,7 @@ class TestEtiqueta:
 
     def test_estan_catalogadas_todas_las_del_pipeline(self) -> None:
         """Una métrica sin rótulo saldría en la interfaz con su nombre en crudo."""
-        c = config_similitud
-        derivadas = (
-            {n for n, _, _ in c.PLAYER_RATIO_FEATURES}
-            | {n for n, _, _ in c.TEAM_RATIO_FEATURES}
-            | {n for n, _, _ in c.PLAYER_DIFF_FEATURES}
-            | {n for n, _, _ in c.TEAM_DIFF_FEATURES}
-        )
-        todas = (
-            set(c.PLAYER_COUNT_FEATURES) | set(c.TEAM_COUNT_FEATURES)
-            | set(c.TEAM_RATE_FEATURES) | derivadas
-        )
-        assert todas <= set(glosario.ETIQUETAS)
+        assert _features_del_pipeline() <= set(glosario.ETIQUETAS)
 
 
 class TestFormatear:
@@ -100,3 +105,93 @@ class TestUnidad:
 
     def test_una_entidad_desconocida_no_inventa_unidad(self) -> None:
         assert glosario.unidad("passes", "arbitro") == ""
+
+
+class TestDefinicion:
+    def test_explica_que_mide_la_metrica(self) -> None:
+        assert "25 %" in glosario.definicion("progressive_passes")
+
+    def test_las_posiciones_tienen_su_propia_nota(self) -> None:
+        """No son una métrica de juego, pero sí tienen rótulo."""
+        assert glosario.definicion("pos_center_forward") == glosario.DEFINICION_POSICION
+
+    def test_una_metrica_desconocida_no_inventa_definicion(self) -> None:
+        """Vale más omitir la explicación que fabricarla."""
+        assert glosario.definicion("metrica_inventada") == ""
+
+    def test_estan_definidas_todas_las_del_pipeline(self) -> None:
+        """El glosario tiene que cubrir el vector real, no una parte de él."""
+        assert _features_del_pipeline() <= set(glosario.DEFINICIONES)
+
+    def test_el_glosario_llega_a_todas_las_del_pipeline(self) -> None:
+        """Una métrica sin fase existiría en el modelo y no en la página."""
+        en_alguna_fase = {
+            t.feature
+            for entidad in ("jugador", "equipo")
+            for b in glosario.glosario_de(entidad)
+            for t in b.terminos
+        }
+        assert _features_del_pipeline() <= en_alguna_fase
+
+
+class TestGlosarioPorFase:
+    """El glosario que sirve la página `/glosario`."""
+
+    @pytest.mark.parametrize("entidad", ["jugador", "equipo"])
+    def test_usa_las_fases_del_radar(self, entidad: str) -> None:
+        """Describir un reparto distinto del que se dibuja confundiría al lector."""
+        bloques = glosario.glosario_de(entidad)
+        assert [b.fase for b in bloques] == list(cat_fases.fases_de(entidad))
+
+    @pytest.mark.parametrize("entidad", ["jugador", "equipo"])
+    def test_cada_fase_va_en_orden_alfabetico(self, entidad: str) -> None:
+        for bloque in glosario.glosario_de(entidad):
+            claves = [t.orden for t in bloque.terminos]
+            assert claves == sorted(claves)
+
+    def test_el_orden_ignora_los_acentos(self) -> None:
+        """Con orden por code point, «Área» se iría detrás de «Toques»."""
+        assert glosario.Termino(
+            feature="x", etiqueta="Área", definicion="", unidad="", invertida=False
+        ).orden == "area"
+
+    @pytest.mark.parametrize("entidad", ["jugador", "equipo"])
+    def test_estan_todas_las_metricas_de_la_entidad(self, entidad: str) -> None:
+        """Una métrica sin fase se quedaría fuera de la página sin avisar."""
+        del_glosario = {
+            t.feature for b in glosario.glosario_de(entidad) for t in b.terminos
+        }
+        de_las_fases = {
+            f for fase in cat_fases.fases_de(entidad) for f in fase.features
+        }
+        assert del_glosario == de_las_fases
+
+    @pytest.mark.parametrize("entidad", ["jugador", "equipo"])
+    def test_ninguna_metrica_se_queda_sin_definir(self, entidad: str) -> None:
+        sin_definicion = [
+            t.feature for b in glosario.glosario_de(entidad) for t in b.terminos
+            if not t.definicion
+        ]
+        assert sin_definicion == []
+
+    def test_las_metricas_invertidas_van_marcadas(self) -> None:
+        """Sin la marca, «le regatean mucho» se leería como una virtud."""
+        duelos = next(
+            b for b in glosario.glosario_de("jugador") if b.clave == "duelos"
+        )
+        regateado = next(t for t in duelos.terminos if t.feature == "dribbled_past")
+        assert regateado.invertida
+
+    def test_la_unidad_depende_de_la_entidad(self) -> None:
+        """La misma métrica es «por 90 min» en el jugador y «por partido» en el equipo."""
+        unidades = {}
+        for entidad in ("jugador", "equipo"):
+            bloque = next(
+                b for b in glosario.glosario_de(entidad) if b.clave == "progresion"
+            )
+            termino = next(t for t in bloque.terminos if t.feature == "progressive_passes")
+            unidades[entidad] = termino.unidad
+        assert unidades == {"jugador": "por 90 min", "equipo": "por partido"}
+
+    def test_una_entidad_desconocida_da_un_glosario_vacio(self) -> None:
+        assert glosario.glosario_de("arbitro") == ()

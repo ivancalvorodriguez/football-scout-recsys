@@ -31,19 +31,25 @@
       <ul class="rasgos">
         {% for r in rec.rasgos %}
           <li>
-            <span class="rasgo-nombre">{{ r.etiqueta }}</span>
+            <span class="rasgo-nombre">{{ r.etiqueta }}
+              {%- if r.invertida %}
+                <span class="marca-invertida" title="En esta métrica, menos es mejor">↓</span>
+              {%- endif %}
+            </span>
             {% if hay_crudos %}
               <span class="z valor-real">{{ r.texto }}</span>
               {% if r.unidad %}<span class="unidad">{{ r.unidad }}</span>{% endif %}
             {% endif %}
-            <span class="z {{ 'z-secundario' if hay_crudos }} {{ 'z-alto' if r.valor >= 0 else 'z-bajo' }}"
+            <span class="z {{ 'z-secundario' if hay_crudos }} {{ r.clase_z }}"
                   title="Desviaciones típicas respecto a {{ referencia_z }}">{{ '%+.2f' % r.valor }}</span>
           </li>
         {% endfor %}
       </ul>
     {% endif %}
     <p class="apunte modelo-usado">
-      Modelo: {{ etiqueta_formulacion[clave.formulacion] }} ·
+      Modelo: <strong>{{ variante.nombre if variante else clave.variante }}</strong> ·
+      datos: {{ conjunto.nombre if conjunto else '—' }} ·
+      {{ etiqueta_formulacion[clave.formulacion] }} ·
       {{ etiqueta_normalizacion[clave.normalizacion] }}
     </p>
   </section>
@@ -97,10 +103,15 @@
             </div>
 
             {% if c.coincidencias %}
-              <table class="coincidencias">
+              {# La fase va en columna propia, igual que en la tabla de rasgos de
+                 la ficha: es el puente con el radar de arriba, que agrupa por
+                 esas mismas fases, y de un vistazo dice si el parecido está
+                 repartido o concentrado en una sola faceta del juego. #}
+              <table class="coincidencias con-fase">
                 <thead>
                   <tr>
                     <th>Coinciden en</th>
+                    <th>Fase</th>
                     <th>{{ rec.referencia.nombre }}</th>
                     <th>{{ c.entidad.nombre }}</th>
                   </tr>
@@ -110,18 +121,22 @@
                     <tr>
                       <td>
                         {{ co.etiqueta }}
+                        {%- if co.invertida %}
+                          <span class="marca-invertida" title="En esta métrica, menos es mejor">↓</span>
+                        {%- endif %}
                         {%- if hay_crudos and co.unidad %}
                           <span class="unidad">{{ co.unidad }}</span>
                         {%- endif %}
                       </td>
+                      <td class="apunte celda-fase">{{ co.fase or '—' }}</td>
                       <td class="z valor-real">
                         {% if hay_crudos %}{{ co.texto_referencia }}{% endif %}
-                        <span class="{{ 'z-secundario' if hay_crudos }} {{ 'z-alto' if co.referencia >= 0 else 'z-bajo' }}"
+                        <span class="{{ 'z-secundario' if hay_crudos }} {{ co.clase_referencia }}"
                               title="Desviaciones típicas respecto a {{ referencia_z }}">{{ '%+.2f' % co.referencia }}</span>
                       </td>
                       <td class="z valor-real">
                         {% if hay_crudos %}{{ co.texto_candidato }}{% endif %}
-                        <span class="{{ 'z-secundario' if hay_crudos }} {{ 'z-alto' if co.candidato >= 0 else 'z-bajo' }}"
+                        <span class="{{ 'z-secundario' if hay_crudos }} {{ co.clase_candidato }}"
                               title="Desviaciones típicas respecto a {{ referencia_z }}">{{ '%+.2f' % co.candidato }}</span>
                       </td>
                     </tr>

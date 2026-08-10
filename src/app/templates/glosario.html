@@ -1,0 +1,99 @@
+{#
+  Glosario de métricas: qué mide cada una, agrupadas por entidad y por fase.
+
+  Espera `secciones` (una por entidad, con sus `bloques` de fase ya ordenados
+  alfabéticamente) y `definicion_posicion`. No recibe modelo ni conjunto de
+  datos: describe el catálogo del pipeline, que es el mismo se sirva lo que se
+  sirva, así que la página funciona aunque todavía no haya nada construido.
+
+  El índice de arriba es un ancla por fase; con dos entidades y catorce fases,
+  bajar a mano hasta «Territorio» es incómodo.
+#}
+{% extends "base.html" %}
+
+{% block titulo %}Glosario de métricas · Scouting por similitud{% endblock %}
+
+{% block contenido %}
+  <section class="panel">
+    <h1>Glosario de métricas</h1>
+    <p class="ayuda">
+      Qué mide cada métrica del modelo y cómo se calcula. Está dividido en
+      <strong>jugador</strong> y <strong>equipo</strong> —los dos vectores no
+      comparten catálogo— y, dentro de cada uno, por <strong>fase de juego</strong>:
+      las mismas fases que dibuja el radar de perfiles.
+    </p>
+    <p class="apunte">
+      Salvo que se diga otra cosa, la definición es la de <strong>StatsBomb</strong>,
+      que es el proveedor de los datos. No son intercambiables con las de FBref,
+      Opta o Wyscout: varias métricas con el mismo nombre usan umbrales distintos.
+      Detalle en <code>docs/metricas_finales.md</code> y
+      <code>docs/extraccion_estadisticas.md</code>.
+    </p>
+
+    <nav class="indice-glosario" aria-label="Índice del glosario">
+      {% for seccion in secciones %}
+        <p class="indice-entidad">
+          <span class="indice-titulo">{{ seccion.etiqueta | capitalize }}:</span>
+          {% for bloque in seccion.bloques %}
+            <a href="#{{ seccion.entidad }}-{{ bloque.clave }}">{{ bloque.etiqueta }}</a>
+          {%- if not loop.last %} · {% endif %}
+          {% endfor %}
+        </p>
+      {% endfor %}
+    </nav>
+  </section>
+
+  {% for seccion in secciones %}
+    <section class="panel">
+      <h2 id="{{ seccion.entidad }}">Métricas de {{ seccion.etiqueta }}</h2>
+      <p class="apunte">
+        {{ seccion.bloques | map(attribute='terminos') | map('length') | sum }}
+        métricas en {{ seccion.bloques | length }} fases. Los conteos se expresan
+        <strong>{{ seccion.unidad_conteo }}</strong>; lo que no es un conteo lleva
+        su propio denominador junto al nombre.
+      </p>
+
+      {% for bloque in seccion.bloques %}
+        <div class="fase-glosario" id="{{ seccion.entidad }}-{{ bloque.clave }}">
+          <h3 class="titulo-fase">{{ bloque.etiqueta }}</h3>
+          <p class="apunte">{{ bloque.descripcion }}</p>
+          {# Cada pareja va envuelta en un <div> (válido dentro de un <dl>) para
+             que el grid de dos columnas no separe un término de su definición. #}
+          <dl class="terminos">
+            {% for t in bloque.terminos %}
+              <div class="termino">
+                <dt>
+                  {{ t.etiqueta }}
+                  {%- if t.invertida %}
+                    <span class="marca-invertida" title="En esta métrica, menos es mejor">↓</span>
+                  {%- endif %}
+                  {%- if t.unidad %}
+                    <span class="unidad">{{ t.unidad }}</span>
+                  {%- endif %}
+                </dt>
+                <dd>{{ t.definicion }}</dd>
+              </div>
+            {% endfor %}
+          </dl>
+        </div>
+      {% endfor %}
+    </section>
+  {% endfor %}
+
+  <section class="panel">
+    <h2>Lo que no es una métrica</h2>
+    <dl class="terminos">
+      <div class="termino">
+        <dt>Posición <span class="unidad">% de sus minutos</span>
+        </dt>
+        <dd>{{ definicion_posicion }}</dd>
+      </div>
+    </dl>
+    <p class="apunte">
+      La fase <strong>Perfil/Valor global</strong> del jugador (VAEP, OBV, Player
+      Vectors, PlayeRank) no aparece en este glosario porque no se puede calcular
+      desde datos de eventos abiertos: necesita modelos o coeficientes que no son
+      públicos. Por eso el radar del jugador tiene seis ejes y el del equipo, siete.
+    </p>
+  </section>
+{% endblock %}

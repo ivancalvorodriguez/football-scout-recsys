@@ -7,7 +7,16 @@ from pathlib import Path
 
 import pytest
 
+from src.app import config as config_app
+from src.app import glosario
+from src.app.catalogo import ClaveModelo
 from src.app.factoria import crear_app
+from src.tests.app.conftest import (
+    CONJUNTO_NOMBRE,
+    CONJUNTO_SLUG,
+    VARIANTE_NOMBRE,
+    VARIANTE_SLUG,
+)
 
 pytestmark = pytest.mark.integracion
 
@@ -82,29 +91,40 @@ class TestSimilares:
     def test_entidad_desconocida(self, cliente) -> None:
         assert cliente.get("/similares?entidad=arbitro&nombre=x").status_code == 400
 
-    def test_formulacion_desconocida(self, cliente) -> None:
-        r = cliente.get("/similares?entidad=jugador&nombre=Messi&formulacion=9")
+    def test_modelo_desconocido(self, cliente) -> None:
+        r = cliente.get("/similares?entidad=jugador&nombre=Messi&modelo=fantasma")
         assert r.status_code == 400
 
-    def test_elige_el_modelo_pedido(self, cliente) -> None:
-        html = _texto(
-            cliente.get("/similares?entidad=jugador&nombre=Messi&formulacion=2&normalizacion=global")
-        )
-        assert "Formulación 2" in html and "global" in html
+    def test_sin_pedir_modelo_responde_el_base(self, cliente) -> None:
+        html = _texto(cliente.get("/similares?entidad=jugador&nombre=Messi"))
+        assert config_app.NOMBRE_BASE in html
 
-    def test_una_combinacion_sin_artefacto_no_finge_que_no_hay_nada(
+    def test_elige_el_modelo_pedido(self, cliente) -> None:
+        """Y responde con SU universo: el reentrenado conoce al fichaje nuevo."""
+        html = _texto(cliente.get(
+            f"/similares?entidad=jugador&nombre=Fichaje&modelo={VARIANTE_SLUG}"))
+        assert VARIANTE_NOMBRE in html and "Fichaje Reciente" in html
+
+    def test_ese_nombre_no_existe_en_el_modelo_base(self, cliente) -> None:
+        r = cliente.get("/similares?entidad=jugador&nombre=Fichaje")
+        assert r.status_code == 404
+
+    def test_un_modelo_que_no_cubre_la_entidad_no_finge_que_no_hay_nada(
         self, dir_modelos: Path, tmp_path: Path
     ) -> None:
-        """Con la F5 construida y la F2 no, pedir la F2 informa de ESO."""
-        destino = tmp_path / "solo_f5"
-        destino.mkdir()
+        """Un reentrenamiento a medias (solo jugador) pedido para equipo informa de ESO."""
+        destino = tmp_path / "a_medias"
+        raiz = destino / config_app.SUBDIR_VARIANTES / "solo-jugador"
+        raiz.mkdir(parents=True)
         for sufijo in (".npz", ".json"):
-            origen = dir_modelos / f"formulacion5_jugador_por_liga{sufijo}"
-            (destino / origen.name).write_bytes(origen.read_bytes())
+            origen = dir_modelos / f"{ClaveModelo('jugador').stem}{sufijo}"
+            (raiz / origen.name).write_bytes(origen.read_bytes())
+            base = dir_modelos / f"{ClaveModelo('equipo').stem}{sufijo}"
+            (destino / base.name).write_bytes(base.read_bytes())
         cliente = crear_app(destino, testing=True).test_client()
-        r = cliente.get("/similares?entidad=jugador&nombre=Messi&formulacion=2")
+        r = cliente.get("/similares?entidad=equipo&nombre=Barcelona&modelo=solo-jugador")
         assert r.status_code == 503
-        assert "No hay modelo para" in _texto(r)
+        assert "no tiene artefacto de equipo" in _texto(r)
 
     def test_las_ligas_se_muestran_con_su_nombre(self, cliente) -> None:
         assert "La Liga 2015/2016" in _texto(
@@ -228,45 +248,118 @@ class TestValoresReales:
         html = _texto(cliente.get("/similares?entidad=jugador&id=10&k=1"))
         assert "valor-real" in html
 
+
+class TestFaseEnLasCoincidencias:
+    """Cada métrica de «coinciden en» dice a qué fase de juego pertenece."""
+
+    def test_la_tabla_tiene_columna_de_fase(self, cliente) -> None:
+        html = _texto(cliente.get("/similares?entidad=jugador&id=10&k=1"))
+        assert "<th>Fase</th>" in html and "celda-fase" in html
+
+    def test_escribe_la_fase_de_cada_metrica(self, cliente) -> None:
+        """Las features del modelo de prueba son una por fase de jugador."""
+        html = _texto(cliente.get("/similares?entidad=jugador&id=10&k=1"))
+        for fase in ("Progresión", "Creación", "Juego aéreo", "Defensa"):
+            assert fase in html
+
+    def test_tambien_sin_base_de_datos(self, cliente_sin_bd) -> None:
+        """La fase sale de la taxonomía, no de la BD: no depende de ella."""
+        html = _texto(cliente_sin_bd.get("/similares?entidad=jugador&id=10&k=1"))
+        assert "celda-fase" in html
+
+    def test_la_api_la_expone(self, cliente) -> None:
+        datos = cliente.get("/api/similares?entidad=jugador&id=10&k=1").get_json()
+        coincidencias = datos["candidatos"][0]["coincidencias"]
+        assert all("fase" in co for co in coincidencias)
+        assert any(co["fase"] for co in coincidencias)
+
     def test_sin_bd_se_vuelve_al_z_score(self, cliente_sin_bd) -> None:
         """Los valores reales se reconstruyen de la BD; sin ella no los hay."""
         html = _texto(cliente_sin_bd.get("/jugador/10"))
         assert "z-secundario" not in html
-        assert "Medidas en z-scores frente a la media de su liga y temporada" in html
+        assert "Medidas en z-scores frente a la media global (todas las ligas)" in html
 
     def test_sin_bd_la_ficha_sigue_completa(self, cliente_sin_bd) -> None:
         html = _texto(cliente_sin_bd.get("/jugador/10"))
         assert "Destaca en" in html and "radar-area" in html
 
 
+class TestConjuntoDeDatosDelModelo:
+    """Cada modelo se sirve con los adornos de la BD sobre la que se entrenó.
+
+    El fixture monta el caso real: el modelo reentrenado conoce a un jugador y a
+    un equipo que solo existen en el conjunto de datos ampliado. Servirlo con la
+    BD del conjunto base los dejaria sin equipo, sin posiciones, sin valores
+    reales y con la liga en crudo — justo a las entidades por las que se amplio.
+    """
+
+    def test_el_equipo_del_fichaje_sale_de_su_conjunto(self, cliente) -> None:
+        html = _texto(cliente.get(f"/jugador/80?modelo={VARIANTE_SLUG}"))
+        assert "Fichaje Reciente" in html
+        assert "Recien Ascendido" in html          # su equipo, solo en la ampliada
+
+    def test_y_tambien_su_liga_y_sus_posiciones(self, cliente) -> None:
+        html = _texto(cliente.get(f"/jugador/80?modelo={VARIANTE_SLUG}"))
+        assert "Liga Recien Llegada" in html       # traducida, no la clave "9-27"
+        assert "campo-juego" in html               # minutos por posicion
+
+    def test_la_api_dice_con_que_datos_responde(self, cliente) -> None:
+        datos = cliente.get(
+            f"/api/ficha/jugador/80?modelo={VARIANTE_SLUG}").get_json()
+        assert datos["modelo"]["datos"] == CONJUNTO_SLUG
+        assert datos["entidad"]["equipo"] == "Recien Ascendido"
+
+    def test_el_modelo_base_sigue_leyendo_el_conjunto_base(self, cliente) -> None:
+        """Y no se contamina: el fichaje no existe en su universo."""
+        assert cliente.get("/jugador/80").status_code == 404
+        datos = cliente.get("/api/ficha/jugador/10").get_json()
+        assert datos["modelo"]["datos"] == config_app.VARIANTE_BASE
+
+    def test_la_interfaz_rotula_el_conjunto(self, cliente) -> None:
+        html = _texto(cliente.get(f"/similares?entidad=jugador&id=10&k=1"
+                                  f"&modelo={VARIANTE_SLUG}"))
+        assert f"datos: {CONJUNTO_NOMBRE}" in html
+
+    def test_un_conjunto_que_ya_no_esta_no_deja_de_servir(
+        self, dir_modelos: Path, tmp_path: Path
+    ) -> None:
+        """Se pierde algun adorno; el modelo se sigue sirviendo."""
+        cliente = crear_app(
+            dir_modelos, db_path=tmp_path / "otra" / "scouting.db", testing=True
+        ).test_client()
+        r = cliente.get(f"/similares?entidad=jugador&id=10&k=1&modelo={VARIANTE_SLUG}")
+        assert r.status_code == 200
+
+
 class TestReferenciaDelZScore:
     """Contra QUE se mide el z que se enseña depende de la normalizacion.
 
-    Con `global` la media es la de todo el dataset, mezclando ligas: decir «la
-    media de su liga» ahi es falso, y ademas contradecia a la etiqueta del
-    modelo que sale al lado ("z-score global").
+    Los modelos servibles son los dos `global`, asi que la media es la de todo el
+    dataset, mezclando ligas: decir «la media de su liga» ahi seria falso, y
+    ademas contradiria a la etiqueta del modelo que sale al lado ("z-score
+    global"). El rotulo no esta escrito en la plantilla, sale de
+    `config.REFERENCIA_Z` segun la normalizacion, que es lo que permitiria servir
+    `por_liga` sin que la interfaz mienta.
     """
 
-    def test_el_modelo_global_no_habla_de_ligas(self, cliente) -> None:
-        html = _texto(cliente.get("/similares?entidad=jugador&id=10&k=1"
-                                  "&formulacion=5&normalizacion=global"))
+    def test_el_rotulo_depende_de_la_normalizacion(self) -> None:
+        """Las dos redacciones existen; la app sirve la que le toque al modelo."""
+        assert "liga" in config_app.REFERENCIA_Z["por_liga"]
+        assert "global" in config_app.REFERENCIA_Z["global"]
+
+    def test_los_resultados_no_hablan_de_ligas(self, cliente) -> None:
+        html = _texto(cliente.get("/similares?entidad=jugador&id=10&k=1"))
         assert "la media global (todas las ligas)" in html
         assert "media de su liga" not in html
 
-    def test_el_modelo_por_liga_si(self, cliente) -> None:
-        html = _texto(cliente.get("/similares?entidad=jugador&id=10&k=1"
-                                  "&formulacion=5&normalizacion=por_liga"))
-        assert "la media de su liga y temporada" in html
-        assert "media global" not in html
-
     def test_la_ficha_usa_la_misma_referencia(self, cliente) -> None:
-        html = _texto(cliente.get("/jugador/10?formulacion=5&normalizacion=global"))
+        html = _texto(cliente.get("/jugador/10"))
         assert "la media global (todas las ligas)" in html
         assert "media de su liga" not in html
 
     def test_la_tabla_de_rasgos_tambien(self, cliente) -> None:
         """El macro se importa `with context`: sin eso el rotulo se quedaba fijo."""
-        html = _texto(cliente.get("/jugador/10?formulacion=5&normalizacion=global"))
+        html = _texto(cliente.get("/jugador/10"))
         assert (
             'title="Desviaciones típicas respecto a la media global '
             '(todas las ligas)"' in html
@@ -342,6 +435,16 @@ class TestFicha:
     def test_el_radar_de_la_ficha_va_ancho(self, cliente) -> None:
         assert "radar-amplio" in _texto(cliente.get("/equipo/1"))
 
+    def test_el_campo_de_la_ficha_tambien(self, cliente) -> None:
+        """Va solo en su bloque, igual que el radar: mismo ancho y centrado."""
+        html = _texto(cliente.get("/jugador/10"))
+        assert "campo-amplio" in html and "radar-amplio" in html
+
+    def test_el_campo_de_la_comparacion_no(self, cliente) -> None:
+        """Ahi comparte fila con el radar del candidato, no se centra."""
+        html = _texto(cliente.get("/similares?entidad=jugador&nombre=Messi&k=1"))
+        assert "campo-amplio" not in html
+
     def test_la_ficha_de_un_equipo(self, cliente) -> None:
         r = cliente.get("/equipo/1")
         assert r.status_code == 200
@@ -352,8 +455,10 @@ class TestFicha:
 
     def test_conserva_el_modelo_de_la_recomendacion(self, cliente) -> None:
         """La ficha se lee sobre el mismo artefacto que produjo el ranking."""
-        html = _texto(cliente.get("/jugador/10?formulacion=2&normalizacion=global"))
-        assert "Formulación 2" in html and "z-score global" in html
+        html = _texto(cliente.get(f"/jugador/10?modelo={VARIANTE_SLUG}"))
+        assert VARIANTE_NOMBRE in html
+        # Y el enlace de vuelta a los similares no pierde el modelo elegido.
+        assert f"modelo={VARIANTE_SLUG}" in html
 
     def test_un_id_inexistente_da_404(self, cliente) -> None:
         assert cliente.get("/jugador/999").status_code == 404
@@ -457,7 +562,12 @@ class TestApiSimilares:
         datos = cliente.get("/api/similares?entidad=jugador&nombre=Messi&k=2").get_json()
         assert datos["referencia"]["nombre"] == "Lionel Messi"
         assert datos["modelo"] == {
-            "entidad": "jugador", "formulacion": "5", "normalizacion": "por_liga",
+            "entidad": "jugador",
+            "variante": config_app.VARIANTE_BASE,
+            "nombre": config_app.NOMBRE_BASE,
+            "datos": config_app.VARIANTE_BASE,
+            "formulacion": config_app.MODELO_BASE["jugador"][0],
+            "normalizacion": config_app.MODELO_BASE["jugador"][1],
         }
         assert len(datos["candidatos"]) == 2
         assert datos["candidatos"][0]["rango"] == 1
@@ -491,6 +601,43 @@ class TestApiSimilares:
         r = cliente.get("/api/sugerencias?entidad=jugador&q=soyuncu")
         assert "Çağlar Söyüncü" in r.get_data(as_text=True)
         assert "\\u" not in r.get_data(as_text=True)
+
+
+class TestGlosario:
+    """Qué mide cada métrica, por entidad y fase."""
+
+    def test_se_sirve(self, cliente) -> None:
+        r = cliente.get("/glosario")
+        assert r.status_code == 200
+        assert "Glosario de métricas" in _texto(r)
+
+    def test_separa_jugador_de_equipo(self, cliente) -> None:
+        """Los dos vectores no comparten catálogo de métricas."""
+        html = _texto(cliente.get("/glosario"))
+        assert "Métricas de jugadores" in html and "Métricas de equipos" in html
+
+    def test_agrupa_por_fase(self, cliente) -> None:
+        html = _texto(cliente.get("/glosario"))
+        for fase in ("Progresión", "Juego aéreo", "Territorio", "Estilo"):
+            assert fase in html
+
+    def test_explica_las_metricas_y_no_solo_las_nombra(self, cliente) -> None:
+        html = _texto(cliente.get("/glosario"))
+        assert glosario.DEFINICIONES["deep_completions"] in html
+
+    def test_no_necesita_ningun_modelo(self, tmp_path: Path) -> None:
+        """El catálogo de métricas no depende de qué haya construido el usuario.
+
+        Es justo con la app recién instalada cuando más falta hace saber qué
+        significa cada cosa, así que la página no puede exigir un artefacto.
+        """
+        cliente = crear_app(tmp_path / "vacio", testing=True).test_client()
+        r = cliente.get("/glosario")
+        assert r.status_code == 200
+        assert "Goles esperados" in _texto(r)
+
+    def test_se_llega_desde_cualquier_pagina(self, cliente) -> None:
+        assert 'href="/glosario"' in _texto(cliente.get("/"))
 
 
 class TestPaginasDeError:

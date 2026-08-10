@@ -28,27 +28,22 @@
     <ul class="sugerencias" id="sugerencias" hidden></ul>
   </div>
 
-  <div class="campo campo-modelo">
-    <label for="formulacion">Formulación</label>
-    <select id="formulacion" name="formulacion">
-      {% for f in opciones | map(attribute='formulacion') | unique | sort %}
-        <option value="{{ f }}" {{ 'selected' if clave and f == clave.formulacion }}>
-          F{{ f }}
-        </option>
-      {% endfor %}
-    </select>
-  </div>
-
-  <div class="campo campo-modelo">
-    <label for="normalizacion">Normalización</label>
-    <select id="normalizacion" name="normalizacion">
-      {% for n in opciones | map(attribute='normalizacion') | unique | sort %}
-        <option value="{{ n }}" {{ 'selected' if clave and n == clave.normalizacion }}>
-          {{ etiqueta_normalizacion[n] }}
-        </option>
-      {% endfor %}
-    </select>
-  </div>
+  {# Un solo desplegable de modelo: el de fábrica y los que el usuario haya
+     reentrenado. Cada uno trae su artefacto de jugador y el de equipo, así que
+     al cambiar de entidad se sigue respondiendo con el modelo elegido. Con solo
+     el base no hay nada que elegir y el desplegable no se pinta. #}
+  {% if variantes | length > 1 %}
+    <div class="campo campo-modelo">
+      <label for="modelo">Modelo</label>
+      <select id="modelo" name="modelo">
+        {% for v in variantes %}
+          <option value="{{ v.slug }}" {{ 'selected' if clave and v.slug == clave.variante }}>
+            {{ v.nombre }}
+          </option>
+        {% endfor %}
+      </select>
+    </div>
+  {% endif %}
 
   <div class="campo campo-k">
     <label for="k">Top</label>

@@ -41,6 +41,20 @@ def etiqueta_feature(nombre: str) -> str:
     return glosario.etiqueta(nombre)
 
 
+def clase_z(valor: float, invertida: bool = False) -> str:
+    """Clase CSS con la que se pinta un z-score: verde = bueno, rojo = malo.
+
+    El color va por CALIDAD, no por signo. En las métricas de
+    `fases.FEATURES_INVERTIDAS` subir es empeorar, así que ahí el z positivo se
+    pinta del color del negativo y viceversa: sin esto, un +1,5 en «veces que le
+    regatean» se leería como una virtud. Es la misma orientación que ya aplican
+    el radar (`fases`) y los puntos fuertes/débiles (`_orientadas`), llevada al
+    número suelto.
+    """
+    bueno = valor <= 0 if invertida else valor >= 0
+    return "z-alto" if bueno else "z-bajo"
+
+
 @dataclass(frozen=True)
 class Coincidencia:
     """Una feature en la que referencia y candidato se parecen.
@@ -56,6 +70,13 @@ class Coincidencia:
     candidato: float
     referencia_cruda: float | None = None
     candidato_cruda: float | None = None
+    # True si en esta métrica subir es empeorar (`fases.FEATURES_INVERTIDAS`).
+    invertida: bool = False
+    # Fase de juego a la que pertenece la métrica, cuando se conoce. Es lo que
+    # convierte cuatro coincidencias sueltas en una lectura: «coinciden en tres
+    # métricas de Progresión» dice algo que las métricas por separado no dicen,
+    # y es además el puente con el radar, que agrupa por esas mismas fases.
+    fase: str | None = None
     # Tipo de entidad: decide si un conteo es «por 90'» o «por partido».
     entidad: str = ""
 
@@ -74,6 +95,14 @@ class Coincidencia:
     @property
     def texto_candidato(self) -> str:
         return glosario.formatear(self.feature, self.candidato_cruda)
+
+    @property
+    def clase_referencia(self) -> str:
+        return clase_z(self.referencia, self.invertida)
+
+    @property
+    def clase_candidato(self) -> str:
+        return clase_z(self.candidato, self.invertida)
 
 
 @dataclass(frozen=True)
@@ -106,6 +135,10 @@ class Rasgo:
     @property
     def texto(self) -> str:
         return glosario.formatear(self.feature, self.crudo)
+
+    @property
+    def clase_z(self) -> str:
+        return clase_z(self.valor, self.invertida)
 
 
 @dataclass(frozen=True)
@@ -296,6 +329,7 @@ def coincidencias(
     cand = modelo.feat_display[j]
     relevancia = np.abs(ref[cols]) - np.abs(ref[cols] - cand[cols])
     orden = [cols[p] for p in np.argsort(relevancia)[::-1][:n]]
+    mapa = fases.fase_por_feature(modelo.entidad)
     return tuple(
         Coincidencia(
             feature=modelo.feat_names[f],
@@ -303,10 +337,23 @@ def coincidencias(
             candidato=float(cand[f]),
             referencia_cruda=_crudo(crudos, i, f),
             candidato_cruda=_crudo(crudos, j, f),
+            invertida=modelo.feat_names[f] in fases.FEATURES_INVERTIDAS,
+            fase=_etiqueta_fase(mapa, modelo.feat_names[f]),
             entidad=modelo.entidad,
         )
         for f in orden
     )
+
+
+def _etiqueta_fase(mapa: dict[str, fases.Fase], feature: str) -> str | None:
+    """Fase de una métrica según `mapa`, o None si no pertenece a ninguna.
+
+    None y no un texto de relleno: una métrica del artefacto que no esté en la
+    taxonomía (una añadida al pipeline y todavía no repartida) sale sin fase, y
+    la interfaz lo escribe como «—» en vez de asignarle una que no le toca.
+    """
+    fase = mapa.get(feature)
+    return fase.etiqueta if fase is not None else None
 
 
 def rasgos(
@@ -337,6 +384,7 @@ def rasgos(
             feature=modelo.feat_names[f],
             valor=float(valores[f]),
             crudo=_crudo(crudos, i, f),
+            invertida=modelo.feat_names[f] in fases.FEATURES_INVERTIDAS,
             entidad=modelo.entidad,
         )
         for f in orden
@@ -371,13 +419,12 @@ def _rasgo(
     crudos: np.ndarray | None,
 ) -> Rasgo:
     nombre = modelo.feat_names[col]
-    fase = mapa_fases.get(nombre)
     return Rasgo(
         feature=nombre,
         valor=float(modelo.feat_display[i, col]),
         crudo=_crudo(crudos, i, col),
         invertida=nombre in fases.FEATURES_INVERTIDAS,
-        fase=fase.etiqueta if fase is not None else None,
+        fase=_etiqueta_fase(mapa_fases, nombre),
         entidad=modelo.entidad,
     )
 

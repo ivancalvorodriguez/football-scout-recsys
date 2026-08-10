@@ -13,6 +13,11 @@
       <span>Scouting por similitud</span>
     </a>
     <p class="lema">Recomendador de jugadores y equipos con perfil parecido, sobre StatsBomb Open Data.</p>
+    <nav class="navegacion">
+      <a href="{{ url_for('web.inicio') }}">Buscar</a>
+      <a href="{{ url_for('web.glosario_metricas') }}">Glosario</a>
+      <a href="{{ url_for('datos.panel') }}">Datos y modelos</a>
+    </nav>
   </header>
 
   <main class="contenido">
@@ -30,5 +35,6 @@
   <script src="{{ url_for('static', filename='buscador.js') }}"></script>
   {# Mejora el tooltip de las marcas del campo; sin el, el <title> SVG sigue. #}
   <script src="{{ url_for('static', filename='campo.js') }}"></script>
+  {% block scripts %}{% endblock %}
 </body>
 </html>

@@ -59,7 +59,12 @@ class TestBuild:
             "--db", str(bd_sintetica), "--out", str(tmp_path),
             "--formulacion", "5", "--entidad", "equipo", "--normalizacion", "global",
         ])
-        assert list(tmp_path.glob("*.npz")) == [tmp_path / "formulacion5_equipo_global.npz"]
+        # Solo esa combinacion; el `.warm.npz` que la acompana es el estado
+        # reutilizable del mismo modelo, no otra combinacion (ver `similitud.warm`).
+        assert sorted(p.name for p in tmp_path.glob("*.npz")) == [
+            "formulacion5_equipo_global.npz",
+            "formulacion5_equipo_global.warm.npz",
+        ]
 
     def test_no_toca_la_base_de_datos(self, bd_sintetica: Path, tmp_path: Path) -> None:
         """`build` es de solo lectura sobre la BD del extractor."""

@@ -12,6 +12,12 @@ guardado en `outputs/modelo/`. No modifica la BD (solo lectura).
 Cada modo de normalizacion genera un artefacto independiente con sufijo en el
 nombre (``_por_liga`` o ``_global``); con `--normalizacion ambas` se generan los
 dos, lo que permite al comparador cruzarlos sin reentrenar.
+
+Junto a cada artefacto se deja su ESTADO warm (`<stem>.warm.npz`): lo que el
+ajuste ha aprendido por debajo de la S servible. `build` siempre ajusta en frio;
+ese estado es lo que despues permite a `src.incremental.reentrenar` incorporar
+partidos nuevos sin repetir el trabajo. Borrarlo no rompe nada: solo obliga al
+siguiente reentrenamiento a arrancar de cero.
 """
 
 from __future__ import annotations
@@ -20,7 +26,7 @@ import argparse
 import time
 from pathlib import Path
 
-from . import config, data, features, formulacion2, formulacion5
+from . import config, data, features, formulacion2, formulacion5, warm
 from .consulta import configurar_consola
 from .features import NORMALIZACIONES_VALIDAS
 
@@ -49,8 +55,10 @@ def _construir_uno(
         f"{n_obs} observaciones -> {n_ent} entidades, {mf.X.shape[1]} features"
     )
 
-    modelo = _FORMULACIONES[formulacion].construir(mf, entidad, normalizacion)
+    modelo, estado = _FORMULACIONES[formulacion].construir_con_estado(
+        mf, entidad, normalizacion)
     path = modelo.guardar(out_dir)
+    estado.guardar(warm.ruta_estado(out_dir, formulacion, entidad, normalizacion))
     dt = time.perf_counter() - t0
     print(f"    guardado en {path}  ({dt:.1f}s)  meta={modelo.meta.get('descripcion','')}")
 

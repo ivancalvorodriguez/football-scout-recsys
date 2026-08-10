@@ -15,6 +15,7 @@ from src.app.contexto import (
     PasoPorLiga,
     UsoPosicion,
     marcas_campo,
+    reparto_entero,
     texto_trayectoria,
 )
 from src.app.posiciones import POR_NOMBRE
@@ -205,6 +206,110 @@ class TestMarcasCampo:
         assert {m.posicion.nombre for m in marcas} == {
             "Center Forward", "Left Wing", "Right Wing"
         }
+
+
+class TestOrdenDeLasMarcas:
+    """Comparando dos jugadores manda la REFERENCIA, no el maximo de los dos.
+
+    La lista de debajo del campo se recorta a las primeras posiciones: tiene que
+    empezar por donde juega aquel de quien se buscan parecidos.
+    """
+
+    def _uso(self, nombre: str, fraccion: float) -> UsoPosicion:
+        return UsoPosicion(
+            posicion=POR_NOMBRE[nombre], minutos=fraccion * 90.0, fraccion=fraccion
+        )
+
+    def test_ordena_por_el_primer_jugador(self) -> None:
+        marcas = marcas_campo(
+            (self._uso("Right Wing", 0.7), self._uso("Center Forward", 0.3)),
+            (self._uso("Center Forward", 0.9), self._uso("Right Wing", 0.1)),
+        )
+        assert [m.posicion.nombre for m in marcas] == ["Right Wing", "Center Forward"]
+
+    def test_una_posicion_solo_del_candidato_va_detras(self) -> None:
+        """Aunque el candidato juegue ahi el 100 % de sus minutos."""
+        marcas = marcas_campo(
+            (self._uso("Right Wing", 1.0),), (self._uso("Left Back", 1.0),)
+        )
+        assert [m.posicion.nombre for m in marcas] == ["Right Wing", "Left Back"]
+
+    def test_el_candidato_desempata(self) -> None:
+        """Entre dos posiciones que la referencia no usa, manda el candidato."""
+        marcas = marcas_campo(
+            (self._uso("Right Wing", 1.0),),
+            (self._uso("Left Back", 0.3), self._uso("Center Back", 0.7)),
+        )
+        assert [m.posicion.nombre for m in marcas] == [
+            "Right Wing", "Center Back", "Left Back"
+        ]
+
+    def test_con_un_solo_jugador_sigue_siendo_de_mas_a_menos(self) -> None:
+        marcas = marcas_campo(
+            (self._uso("Left Wing", 0.2), self._uso("Center Forward", 0.8))
+        )
+        assert [m.fraccion for m in marcas] == [0.8, 0.2]
+
+
+class TestRepartoDeLosPorcentajes:
+    """Las cifras escritas en el campo tienen que sumar 100 tambien redondeadas.
+
+    Redondear cada una por su cuenta no cuadra: tres tercios dan 99 y tres
+    sextos, 101. Se reparte por el metodo del resto mayor.
+    """
+
+    def _uso(self, nombre: str, fraccion: float) -> UsoPosicion:
+        return UsoPosicion(
+            posicion=POR_NOMBRE[nombre], minutos=fraccion * 90.0, fraccion=fraccion
+        )
+
+    def test_tres_tercios_suman_cien(self) -> None:
+        marcas = marcas_campo((
+            self._uso("Left Wing", 1 / 3), self._uso("Center Forward", 1 / 3),
+            self._uso("Right Wing", 1 / 3),
+        ))
+        assert sum(m.entero for m in marcas) == 100
+        assert sorted(m.porcentaje for m in marcas) == ["33 %", "33 %", "34 %"]
+
+    def test_las_dos_columnas_de_una_comparacion_suman_cien(self) -> None:
+        marcas = marcas_campo(
+            (self._uso("Right Wing", 2 / 3), self._uso("Center Forward", 1 / 3)),
+            (self._uso("Center Forward", 1 / 6), self._uso("Left Wing", 5 / 6)),
+        )
+        assert sum(m.entero for m in marcas) == 100
+        assert sum(m.entero_otro for m in marcas) == 100
+
+    def test_el_punto_que_sobra_va_al_resto_mayor(self) -> None:
+        """No al primero de la lista: la cifra que menos se aleja de su valor."""
+        marcas = marcas_campo((
+            self._uso("Center Back", 0.5), self._uso("Left Back", 1 / 6),
+            self._uso("Right Back", 1 / 6), self._uso("Center Midfield", 1 / 6),
+        ))
+        porcentajes = {m.posicion.nombre: m.porcentaje for m in marcas}
+        assert porcentajes["Center Back"] == "50 %"
+        assert sorted(porcentajes.values()) == ["16 %", "17 %", "17 %", "50 %"]
+
+    def test_una_marca_suelta_redondea_por_su_cuenta(self) -> None:
+        """Fuera de `marcas_campo` no hay conjunto entre el que repartir."""
+        marca = MarcaCampo(posicion=POR_NOMBRE["Left Wing"], fraccion=0.921)
+        assert marca.entero is None
+        assert marca.porcentaje == "92 %"
+
+    def test_sin_minutos_no_se_reparte_nada(self) -> None:
+        assert reparto_entero([]) == ()
+        assert reparto_entero([0.0, 0.0]) == (0, 0)
+
+    def test_el_reparto_no_se_pasa_ni_se_queda_corto(self) -> None:
+        assert sum(reparto_entero([1 / 7] * 7)) == 100
+        assert sum(reparto_entero([0.999, 0.001])) == 100
+
+    def test_una_posicion_no_jugada_se_queda_en_cero(self) -> None:
+        """El 0 % del candidato es un dato; el reparto no puede inventarle un 1 %."""
+        marcas = marcas_campo(
+            (self._uso("Right Wing", 1.0),), (self._uso("Left Back", 1.0),)
+        )
+        derecha = next(m for m in marcas if m.posicion.nombre == "Right Wing")
+        assert derecha.porcentaje_otro == "0 %"
 
 
 class TestRotuloDeLaMarca:
