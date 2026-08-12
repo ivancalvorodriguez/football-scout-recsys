@@ -2,13 +2,13 @@
 
 Sin este modulo, `barrido.py` nombraba las combinaciones `v01`, `v02`, ... por su
 POSICION en el producto cartesiano de `HIPERPARAMETROS`. Como esa lista se EDITA
-entre corridas, el mismo nombre designaba configuraciones distintas en corridas
-distintas, y relanzar el barrido sobre la misma carpeta era destructivo en tres
-sitios a la vez: `vNN/` se sobrescribia con otra configuracion,
+entre ejecuciones, el mismo nombre designaba configuraciones distintas en cada
+una, y relanzar el barrido sobre la misma carpeta era destructivo en tres sitios
+a la vez: `vNN/` se sobrescribia con otra configuracion,
 `barrido_metricas.csv` se reescribia con SOLO las combinaciones de la ultima
-corrida, y `resumen_barrido.md` con ella. Ampliar la rejilla obligaba a crear una
+ejecucion, y `resumen_barrido.md` con ella. Ampliar la rejilla obligaba a crear una
 carpeta nueva a mano (`barrido_v1`, `barrido_v2`...) y las superficies 3D salian
-con los puntos de una unica corrida, que es justo lo que impide ver donde esta el
+con los puntos de una unica ejecucion, que es justo lo que impide ver donde esta el
 optimo.
 
 La carpeta del barrido pasa a ser ACUMULATIVA:
@@ -16,12 +16,12 @@ La carpeta del barrido pasa a ser ACUMULATIVA:
 1. **Nombres por configuracion, no por posicion.** `combinaciones.json` guarda el
    mapa nombre -> valores EFECTIVOS de todos los ejes. Una configuracion ya vista
    recupera su nombre (y con el su carpeta y su cache de modelos); una nueva
-   recibe el siguiente numero libre. Dos corridas cualesquiera sobre la misma
+   recibe el siguiente numero libre. Dos ejecuciones cualesquiera sobre la misma
    carpeta hablan del mismo `v07`.
 2. **Metricas acumuladas.** `barrido_metricas.csv` se funde por
-   `CLAVE_METRICA`: lo que la corrida actual recalcula sustituye a lo guardado,
+   `CLAVE_METRICA`: lo que la ejecucion actual recalcula sustituye a lo guardado,
    lo demas se conserva. Asi `figuras3d` dibuja la superficie con TODOS los
-   puntos evaluados en la carpeta, vengan de una corrida o de cinco.
+   puntos evaluados en la carpeta, vengan de una ejecucion o de cinco.
 3. **Procedencia.** Cada entrada anota cuando se evaluo, con que BD y con que
    hash de codigo. Acumular numeros producidos con datos o nucleo numerico
    distintos los haria incomparables sin avisar, y un fichero acumulado invita
@@ -49,12 +49,20 @@ ARCHIVO = "combinaciones.json"
 ARCHIVO_METRICAS = "barrido_metricas.csv"
 VERSION = 1
 
-# Identidad de una fila de metricas dentro de la carpeta. Lo que la corrida
+# Identidad de una fila de metricas dentro de la carpeta. Lo que la ejecucion
 # actual vuelve a calcular sustituye a lo guardado; el resto se conserva. La
 # entidad/formulacion/normalizacion no entran porque ya estan determinadas por
 # `modelo`: incluirlas solo abriria la puerta a duplicados por discrepancia de
 # formato.
 CLAVE_METRICA = ("combinacion", "modelo", "fase", "metrica")
+
+# Campo de la procedencia que guarda CUANDO se evaluo una combinacion. El campo
+# se llamaba antes de otra manera (`_CAMPO_FECHA_ANTIGUO`); las carpetas escritas
+# entonces se migran al leerlas, para no perder la fecha de lo ya evaluado por un
+# cambio de nombre. Es la unica razon por la que el nombre viejo sigue escrito en
+# el codigo, y puede borrarse cuando no queden carpetas de antes.
+CAMPO_FECHA = "ejecucion"
+_CAMPO_FECHA_ANTIGUO = "corrida"
 
 _RE_NOMBRE = re.compile(r"^v(\d+)$")
 _RE_ADORNO = re.compile(r"[`*]")
@@ -87,7 +95,7 @@ def clave(config: dict[str, object], ejes_id: list[str] | None = None) -> str:
     """Clave de identidad de una configuracion efectiva.
 
     `ejes_id` fija sobre QUE ejes se compara. Es necesario cuando el juego de ejes
-    cambia entre corridas: comparando cada configuracion con sus propias claves,
+    cambia entre ejecuciones: comparando cada configuracion con sus propias claves,
     quitar un eje de `HIPERPARAMETROS` haria que la misma configuracion pareciera
     nueva. Con `ejes_id`, los dos lados se recortan al mismo conjunto.
     """
@@ -182,6 +190,20 @@ def vacio() -> dict:
     return {"version": VERSION, "combinaciones": {}}
 
 
+def _migrar_campo_fecha(registro: dict) -> None:
+    """Renombra el campo de la fecha en las entradas escritas con el nombre viejo.
+
+    Se hace al leer para que una carpeta anterior al cambio conserve la fecha en
+    que se evaluo cada combinacion (el resumen la publica en la columna
+    `evaluada`) y para que el nombre viejo desaparezca del fichero en cuanto se
+    vuelva a guardar. No toca nada mas: es un renombrado, no una reevaluacion.
+    """
+    for entrada in registro.get("combinaciones", {}).values():
+        if _CAMPO_FECHA_ANTIGUO in entrada:
+            entrada.setdefault(CAMPO_FECHA, entrada[_CAMPO_FECHA_ANTIGUO])
+            del entrada[_CAMPO_FECHA_ANTIGUO]
+
+
 def cargar(out_dir: Path) -> dict:
     """Registro de la carpeta; lo migra desde `resumen_barrido.md` si no existe.
 
@@ -203,6 +225,7 @@ def cargar(out_dir: Path) -> dict:
             raise SystemExit(f"{p} es de la version {reg.get('version')} y este "
                              f"codigo escribe la {VERSION}.")
         reg.setdefault("combinaciones", {})
+        _migrar_campo_fecha(reg)
         return reg
 
     combos = leer_markdown(out_dir)
@@ -280,10 +303,10 @@ def nombrar(
     configuraciones: list[dict[str, object]],
     ejes_id: list[str] | None = None,
 ) -> dict[str, dict]:
-    """{nombre -> configuracion} de esta corrida, creando las entradas que falten.
+    """{nombre -> configuracion} de esta ejecucion, creando las entradas que falten.
 
     Muta `registro`. Una configuracion ya registrada recupera su nombre, con lo
-    que la corrida reutiliza su carpeta y su cache de modelos y reescribe SUS
+    que la ejecucion reutiliza su carpeta y su cache de modelos y reescribe SUS
     resultados; una nueva se lleva el siguiente numero libre, sin tocar a las
     demas.
     """
@@ -296,7 +319,7 @@ def nombrar(
             nombre = _siguiente_nombre(set(registro["combinaciones"]))
             registro["combinaciones"][nombre] = {}
             por_clave[k] = nombre
-        # Se reescribe la configuracion con los valores TIPADOS de esta corrida:
+        # Se reescribe la configuracion con los valores TIPADOS de esta ejecucion:
         # una entrada migrada desde markdown guarda lo que se pudo reconstruir del
         # texto, y esta es la unica ocasion de mejorarla sin cambiar su identidad.
         registro["combinaciones"][nombre]["hiperparametros"] = dict(config)
@@ -305,13 +328,13 @@ def nombrar(
 
 
 def anotar(registro: dict, nombres: list[str], procedencia: dict) -> None:
-    """Marca las combinaciones evaluadas en esta corrida (fecha, datos, codigo)."""
+    """Marca las combinaciones evaluadas ahora (fecha, datos, codigo)."""
     for nombre in nombres:
         registro["combinaciones"].setdefault(nombre, {}).update(procedencia)
 
 
 def procedencias(registro: dict) -> dict[str, dict]:
-    """{nombre -> {corrida, datos, codigo}} de las entradas que lo declaran."""
+    """{nombre -> {ejecucion, datos, codigo}} de las entradas que lo declaran."""
     return {n: {k: v for k, v in e.items() if k != "hiperparametros"}
             for n, e in registro["combinaciones"].items()}
 
@@ -414,9 +437,9 @@ def _tipos(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def acumular(previa: pd.DataFrame, nueva: pd.DataFrame) -> pd.DataFrame:
-    """Funde lo guardado con lo de esta corrida: gana lo nuevo, se conserva el resto.
+    """Funde lo guardado con lo recien calculado: gana lo nuevo, se conserva el resto.
 
-    La sustitucion es por `CLAVE_METRICA`, no por combinacion entera: una corrida
+    La sustitucion es por `CLAVE_METRICA`, no por combinacion entera: una ejecucion
     acotada con `--formulaciones 5` reescribe las filas de sus modelos F5 y deja
     intactas las F2 que esa misma combinacion tenia de antes.
     """

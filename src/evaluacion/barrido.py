@@ -2,7 +2,9 @@
 
     python -m src.evaluacion.barrido [--db RUTA] [--out DIR]
                                      [--formulaciones 2,5] [--entidades jugador,equipo]
+                                     [--normalizaciones por_liga,global]
                                      [--fases 0,1,5] [--bootstrap B] [--sin-figuras]
+                                     [--trabajos N|auto] [--sin-reutilizar-metricas]
                                      [--rehacer] [--adoptar-existentes]
 
 A diferencia de `src.evaluacion.evaluar` (que exige que los modelos ya esten
@@ -12,13 +14,41 @@ la rejilla (formulacion 2/5 x jugador/equipo x por_liga/global) en su propia
 carpeta y despues corre el protocolo de evaluacion. Asi se puede lanzar de cero,
 sin `build` previo.
 
+**Como se reparte el trabajo.** La ejecucion no es un bucle de combinaciones: es un
+PLAN de celdas. Una celda es (combinacion, formulacion, entidad, normalizacion) y
+es la unidad indivisible tanto de construccion (un artefacto) como de evaluacion
+(las fases de un modelo, `evaluar.evaluar_modelo`). El plan se calcula entero
+antes de empezar, y eso habilita las dos cosas que hacen que el barrido termine:
+
+1. **Deduplicacion por huella.** Dos celdas de combinaciones distintas cuya huella
+   coincide son el MISMO modelo (es lo que ya sostenia la cache de artefactos: se
+   copia el `.npz` de una a otra). Si el modelo es el mismo y las fases son
+   deterministas —lo son: todas las semillas estan fijadas en
+   `src.evaluacion.config`—, tambien lo son sus metricas. Se ajusta y se evalua
+   una sola vez por huella y el resultado se reparte entre todas las celdas del
+   grupo. Con la rejilla del repo (ejes F2 x ejes F5) eso divide el trabajo entre
+   ~20: mover la lambda del EASE no cambia ni un numero de los modelos F2, y hasta
+   ahora se recalculaban enteros en cada combinacion. `--sin-reutilizar-metricas`
+   lo desactiva (evalua cada celda por su cuenta), que es como se comprueba que la
+   igualdad se cumple de verdad.
+2. **Paralelismo real** (`--trabajos N`). Las celdas son independientes, asi que
+   se reparten entre procesos: distintos modelos —y, con ellos, distintas fases—
+   avanzan a la vez. Tienen que ser PROCESOS y no hilos por dos razones: las fases
+   son bucles de Python (el GIL las serializaria) y cada combinacion fija sus
+   hiperparametros en `src.similitud.config`, que es estado global del interprete.
+   Ver `src/evaluacion/paralelo.py`.
+
+La Fase 3 (triangulacion) no cabe en una celda —compara las S de varios modelos
+entre si—, asi que es una tarea aparte por combinacion.
+
 Los hiperparametros que se barren NO se piden por linea de comandos: estan
 escritos en `HIPERPARAMETROS`, aqui abajo. El barrido recorre el PRODUCTO
 CARTESIANO de esa lista — cada combinacion fija todos los ejes a la vez — y
 construye/evalua cada una en `<out>/vNN/`. La linea de comandos no elige valores
 de hiperparametro: solo decide QUE modelos entran en la rejilla
-(`--formulaciones`, `--entidades`), COMO se evaluan (`--fases`, `--bootstrap`,
-`--sin-figuras`) y que hace la caché (`--rehacer`, `--adoptar-existentes`).
+(`--formulaciones`, `--entidades`, `--normalizaciones`), COMO se evaluan
+(`--fases`, `--bootstrap`, `--sin-figuras`) y que hace la caché (`--rehacer`,
+`--adoptar-existentes`).
 
 Como todo el pipeline lee los valores de `src.similitud.config` en tiempo de
 llamada, basta con fijarlos antes de construir/evaluar y restaurarlos despues. El
@@ -29,7 +59,7 @@ combinaciones entre si.
 sobre la misma `--out` despues de editar `HIPERPARAMETROS` no borra lo anterior.
 Cada combinacion se identifica por su CONFIGURACION, no por su posicion en el
 producto cartesiano, asi que conserva su nombre `vNN` y su carpeta entre
-corridas; las que ya se evaluaron y no vuelven a tocarse mantienen sus metricas
+ejecuciones; las que ya se evaluaron y no vuelven a tocarse mantienen sus metricas
 en `barrido_metricas.csv`, y las nuevas se suman. Ampliar la rejilla es
 simplemente añadir valores a `HIPERPARAMETROS` y volver a lanzar: el resumen y
 las superficies 3D salen con TODOS los puntos acumulados en la carpeta, que es lo
@@ -47,19 +77,20 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import json
 import shutil
 import time
-from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
 
-from src.similitud import build as sbuild
 from src.similitud import config as scfg
 
 from . import config as ecfg
-from . import datos, evaluar, huella, puntuacion, registro
+from . import evaluar, huella, paralelo, puntuacion, registro, trabajo
 from .evaluar import _fmt
+from .trabajo import Celda, config_temporal as _config_temporal
 
 
 # --------------------------------------------------------------------------- #
@@ -78,22 +109,24 @@ from .evaluar import _fmt
 HIPERPARAMETROS: list[tuple[str, list[object]]] = [
     # Formulacion 2 (SLIM instancia-instancia): penalizacion L1 (dispersion de W)
     # y ridge L2.
-    ("F2_L1", [0.5, 0.55, 0.625, 0.675]),
-    ("F2_BETA", [9.75, 10.0, 10.25, 10.5, 10.75, 11.0]),
+    ("F2_L1", [0.475]),
+    ("F2_BETA", [13.75]),
     # Formulacion 5 (distribucional + EASE): fuerza del re-ranking EASE, barrida
     # en un rango amplio (de casi-sin-regularizar a dominado por el ridge), y
     # dimension del embedding RFF con que se aproxima el MMD del jugador.
-    ("F5_EASE_LAMBDA", [0.825, 0.85, 0.875, 0.9, 0.925]),
-    ("F5_RFF_DIM", [896, 1024, 1152, 1280]),
+    ("F5_EASE_LAMBDA", [0.0]),
+    ("F5_RFF_DIM", [1750, 1775]),
 ]
 
 # El bloque de posicion del jugador (25 columnas `pos_*`) NO se barre: forma
 # parte del modelo base, z-scoreado con el resto y dividido por sqrt(25) para que
 # pese como una sola feature (`config.USE_POSITION_FEATURES` /
 # `config.POSITION_SCALING = "zscore_sqrt"`). El resto de features sigue con sus
-# dos normalizaciones, `por_liga` y `global`, que son un eje de la rejilla y no
-# un hiperparametro. Para volver a contrastar el vector con y sin posicion hay
-# que tocar esos dos atributos de `src/similitud/config.py` a mano.
+# dos normalizaciones, `por_liga` y `global`, que son un eje de la REJILLA y no un
+# hiperparametro: por eso se acotan con `--normalizaciones` (como las
+# formulaciones y las entidades) y no se declaran aqui. Por defecto entran las
+# dos, que es lo que permite compararlas. Para volver a contrastar el vector con y
+# sin posicion hay que tocar esos dos atributos de `src/similitud/config.py` a mano.
 
 
 def _valores_declarados() -> dict[str, list[object]]:
@@ -119,20 +152,6 @@ def _validar_hiperparametros() -> None:
         if attr in vistos:
             raise SystemExit(f"el hiperparametro {attr!r} esta declarado dos veces.")
         vistos.add(attr)
-
-
-@contextmanager
-def _config_temporal(valores: dict[str, object]):
-    """Fija atributos de `src.similitud.config` y los restaura al salir."""
-    previos: dict[str, object] = {}
-    for clave, valor in valores.items():
-        previos[clave] = getattr(scfg, clave)
-        setattr(scfg, clave, valor)
-    try:
-        yield
-    finally:
-        for clave, valor in previos.items():
-            setattr(scfg, clave, valor)
 
 
 def _fmt_valores(valores: dict[str, object]) -> str:
@@ -186,7 +205,7 @@ def combinaciones(
 
     Es un respaldo: los nombres reales de una carpeta viven en su
     `combinaciones.json` (`registro`), porque solo ahi son estables entre
-    corridas. Esto solo lo usa `figuras3d` cuando dibuja una carpeta sin registro
+    ejecuciones. Esto solo lo usa `figuras3d` cuando dibuja una carpeta sin registro
     ni resumen, y solo vale si `HIPERPARAMETROS` no ha cambiado desde entonces.
     """
     combos = configuraciones(formulaciones, entidades)
@@ -219,7 +238,7 @@ def _config_efectiva(valores: dict[str, object], ejes: list[str]) -> dict[str, o
 
     El resumen publica esto y no solo los ejes barridos: un eje ausente no quiere
     decir "sin posicion" ni "sin EASE", quiere decir lo que diga
-    `src/similitud/config.py` el dia de la corrida. Sin el valor efectivo, dos
+    `src/similitud/config.py` el dia de la ejecucion. Sin el valor efectivo, dos
     barridos con defaults distintos producen tablas identicas que afirman cosas
     distintas.
 
@@ -234,7 +253,7 @@ def _config_efectiva(valores: dict[str, object], ejes: list[str]) -> dict[str, o
 
 def _stem(formulacion: str, entidad: str, normalizacion: str) -> str:
     """Nombre del artefacto, igual que lo genera `ModeloSimilitud.guardar`."""
-    return f"formulacion{formulacion}_{entidad}_{normalizacion}"
+    return Celda(formulacion, entidad, normalizacion).stem
 
 
 def _origen_reutilizable(
@@ -280,6 +299,73 @@ def _copiar_artefacto(origen: Path, destino: Path, stem: str) -> None:
         shutil.copy2(origen / f"{stem}{ext}", destino / f"{stem}{ext}")
 
 
+# Nombre de la via en el recuento que se imprime.
+_CONTEO = {"cache": "en_cache", "copia": "copiados",
+           "adopta": "adoptados", "construye": "construidos"}
+
+
+def _decidir_celda(
+    db_path: Path, out_dir: Path, model_dir: Path, celda: Celda,
+    rehacer: bool, adoptar: bool,
+) -> tuple[str, Path | None, dict]:
+    """De donde sale el artefacto de la celda: `(via, origen, huella)`.
+
+    Por orden: (1) si el artefacto de esta combinacion ya tiene la huella pedida
+    —mismos hiperparametros, mismos datos, mismo codigo—, no se toca (`cache`);
+    (2) si otra combinacion tiene uno con la misma huella, se copia (`copia`);
+    (3) si `adoptar`, se intenta dar por bueno un artefacto sin huella cuyo meta
+    concuerde (`adopta`); (4) si no, hay que ajustarlo (`construye`). Con
+    `rehacer` se salta la caché entera.
+
+    Tiene que llamarse DENTRO de `config_temporal` de la combinacion: la huella se
+    calcula con la configuracion vigente, y la adopcion la contrasta con ella. La
+    via `adopta` escribe la huella del artefacto adoptado, que es lo que lo
+    convierte en reutilizable; las demas no tocan el disco.
+    """
+    h = huella.calcular(celda.formulacion, celda.entidad, celda.normalizacion,
+                        db_path)
+    if not rehacer:
+        if huella.coincide(model_dir, celda.stem, h):
+            return "cache", model_dir, h
+        origen = _origen_reutilizable(out_dir, model_dir, celda.stem, h)
+        if origen is not None:
+            return "copia", origen, h
+        if adoptar and huella.adoptar(model_dir, celda.stem, celda.entidad, h):
+            return "adopta", model_dir, h
+    return "construye", None, h
+
+
+def _log_via(
+    via: str, celda: Celda, model_dir: Path, origen: Path | None, rehacer: bool
+) -> None:
+    """Dice de que via sale el artefacto y con que ruta.
+
+    Es lo que separa en el log los minutos de un ajuste de los segundos de una
+    copia. Las tres vias de cache dicen de donde se carga y por que valia; la
+    construccion dice donde va a escribir y por que no habia nada que reutilizar.
+    """
+    destino = _ruta_visible(model_dir / f"{celda.stem}.npz")
+    if via == "cache":
+        print(f"    [cache]    {celda.stem}")
+        print(f"               carga de disco: {destino} "
+              f"(huella identica, no se reconstruye)")
+    elif via == "copia":
+        print(f"    [copia]    {celda.stem}")
+        print(f"               carga de disco: "
+              f"{_ruta_visible(origen / f'{celda.stem}.npz')} "
+              f"(huella identica en la combinacion {origen.parent.name})")
+    elif via == "adopta":
+        print(f"    [adopta]   {celda.stem}")
+        print(f"               carga de disco: {destino} "
+              f"(sin huella previa, meta concordante)")
+    else:
+        motivo = ("--rehacer: se ignora la cache" if rehacer
+                  else "no hay ningun artefacto con esta huella")
+        print(f"    [construye] {celda.stem}")
+        print(f"               NO se carga de disco, se construye en: "
+              f"{destino} ({motivo})")
+
+
 def _construir_grid(
     db_path: Path,
     model_dir: Path,
@@ -288,73 +374,314 @@ def _construir_grid(
     adoptar: bool = False,
     formulaciones: tuple[str, ...] = ecfg.FORMULACIONES,
     entidades: tuple[str, ...] = ecfg.ENTIDADES,
+    normalizaciones: tuple[str, ...] = ecfg.NORMALIZACIONES,
 ) -> dict[str, int]:
-    """Asegura la rejilla en `model_dir`, reconstruyendo solo lo necesario.
+    """Asegura la rejilla de UNA combinacion en `model_dir`, celda a celda.
 
-    Por cada celda, en orden: (1) si el artefacto de esta combinacion ya tiene la
-    huella pedida —mismos hiperparametros, mismos datos, mismo codigo—, no se
-    toca; (2) si otra combinacion tiene uno con la misma huella, se copia; (3) si
-    `adoptar`, se intenta cargar un artefacto sin huella cuyo meta concuerde;
-    (4) si no, se construye. Con `rehacer` se salta la caché entera. Devuelve el
-    recuento por via, para el log.
+    Camino secuencial y autocontenido (lo usa `evaluar_combinacion`): decide y
+    aplica cada celda en el acto. `main` no pasa por aqui — planifica TODAS las
+    combinaciones juntas (`planificar`) para poder ajustar una sola vez lo que
+    varias comparten y repartirlo entre procesos—, pero las dos vias deciden con
+    la misma funcion, `_decidir_celda`, para que no puedan divergir.
 
-    `formulaciones`/`entidades` acotan la rejilla (por defecto, entera). Las
-    celdas fuera del subconjunto ni se construyen ni se borran: si quedaron de
-    una corrida anterior siguen en disco con su huella, y otra combinacion puede
-    reutilizarlas.
+    Devuelve el recuento por via. `formulaciones`/`entidades`/`normalizaciones`
+    acotan la rejilla (por defecto, entera): las celdas fuera del subconjunto ni se
+    construyen ni se borran, y si quedaron de una ejecucion anterior siguen en
+    disco con su huella para que otra combinacion las reutilice.
+
+    Debe llamarse dentro del `config_temporal` de la combinacion.
     """
     model_dir = Path(model_dir)
     conteo = {"en_cache": 0, "copiados": 0, "adoptados": 0, "construidos": 0}
 
-    for entidad in entidades:
-        for form in formulaciones:
-            for norm in ecfg.NORMALIZACIONES:
-                stem = _stem(form, entidad, norm)
-                h = huella.calcular(form, entidad, norm, db_path)
-
-                if not rehacer:
-                    if huella.coincide(model_dir, stem, h):
-                        print(f"    [cache]    {stem}")
-                        print(f"               carga de disco: "
-                              f"{_ruta_visible(model_dir / f'{stem}.npz')} "
-                              f"(huella identica, no se reconstruye)")
-                        conteo["en_cache"] += 1
-                        continue
-                    origen = _origen_reutilizable(out_dir, model_dir, stem, h)
-                    if origen is not None:
-                        print(f"    [copia]    {stem}")
-                        print(f"               carga de disco: "
-                              f"{_ruta_visible(origen / f'{stem}.npz')} "
-                              f"(huella identica en la combinacion "
-                              f"{origen.parent.name})")
-                        _copiar_artefacto(origen, model_dir, stem)
-                        conteo["copiados"] += 1
-                        continue
-                    if adoptar and huella.adoptar(model_dir, stem, entidad, h):
-                        print(f"    [adopta]   {stem}")
-                        print(f"               carga de disco: "
-                              f"{_ruta_visible(model_dir / f'{stem}.npz')} "
-                              f"(sin huella previa, meta concordante)")
-                        conteo["adoptados"] += 1
-                        continue
-
-                # Ninguna via de la caché ha servido el artefacto: hay que
-                # entrenarlo. Se dice por que, para que el log distinga "no habia
-                # nada reutilizable" de "se pidio --rehacer".
-                motivo = ("--rehacer: se ignora la cache" if rehacer
-                          else "no hay ningun artefacto con esta huella")
-                print(f"    [construye] {stem}")
-                print(f"               NO se carga de disco, se construye en: "
-                      f"{_ruta_visible(model_dir / f'{stem}.npz')} ({motivo})")
-
-                # Borrar la huella ANTES: si la construccion peta, el artefacto a
-                # medias queda sin huella y nadie lo reutilizara.
-                huella.invalidar(model_dir, stem)
-                sbuild._construir_uno(db_path, model_dir, form, entidad, norm)
-                huella.escribir(model_dir, stem, h)
-                conteo["construidos"] += 1
+    for celda in trabajo.celdas(formulaciones, entidades, normalizaciones):
+        via, origen, h = _decidir_celda(db_path, out_dir, model_dir, celda,
+                                        rehacer, adoptar)
+        _log_via(via, celda, model_dir, origen, rehacer)
+        if via == "copia":
+            _copiar_artefacto(origen, model_dir, celda.stem)
+        elif via == "construye":
+            # `valores` vacio: la configuracion de la combinacion ya la fijo el
+            # llamador y este camino no cambia de proceso.
+            trabajo.construir_celda(db_path, model_dir, celda, {}, h)
+        conteo[_CONTEO[via]] += 1
 
     return conteo
+
+
+# --------------------------------------------------------------------------- #
+# Plan de la ejecucion: las celdas de TODAS las combinaciones a la vez            #
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class Paso:
+    """Una celda de una combinacion, con lo que hay que hacer para tenerla.
+
+    `via` sale de `_decidir_celda`; `origen` solo aplica a las copias. `huella` es
+    la identidad del artefacto: dos pasos con la misma huella (y el mismo stem)
+    son el mismo modelo, y de ahi salen las dos deduplicaciones de la ejecucion
+    —ajustar una vez, evaluar una vez—.
+    """
+
+    combinacion: str
+    valores: dict[str, object]
+    celda: Celda
+    model_dir: Path
+    huella: dict = field(repr=False)
+    via: str
+    origen: Path | None = None
+
+    @property
+    def nombre(self) -> str:
+        """Identificador legible y unico del paso (nombre de tarea en el log)."""
+        return f"{self.combinacion} {self.celda.etiqueta}"
+
+    @property
+    def clave_artefacto(self) -> str:
+        """Identidad del MODELO, sin la combinacion de la que salio."""
+        return json.dumps([self.celda.stem, self.huella], sort_keys=True)
+
+
+def planificar(
+    seleccion: dict[str, dict],
+    db_path: Path,
+    out_dir: Path,
+    formulaciones: tuple[str, ...] = ecfg.FORMULACIONES,
+    entidades: tuple[str, ...] = ecfg.ENTIDADES,
+    normalizaciones: tuple[str, ...] = ecfg.NORMALIZACIONES,
+    rehacer: bool = False,
+    adoptar: bool = False,
+) -> list[Paso]:
+    """Decide, para TODAS las celdas de todas las combinaciones, de donde salen.
+
+    Decidirlo entero antes de tocar nada es lo que permite ajustar una sola vez lo
+    que varias combinaciones comparten: cuando dos celdas que hay que construir
+    tienen la misma huella, una se queda como propietaria y la otra pasa a copiar
+    de ella (la copia se hace luego, cuando la propietaria ya existe). Sin este
+    paso previo, N trabajadores arrancando a la vez sobre combinaciones
+    consecutivas ajustarian N veces el mismo modelo: ninguno veria la huella del
+    otro hasta que terminara.
+    """
+    pasos: list[Paso] = []
+    for nombre, valores in seleccion.items():
+        model_dir = Path(out_dir) / nombre / "modelo"
+        with _config_temporal(valores):
+            for celda in trabajo.celdas(formulaciones, entidades, normalizaciones):
+                via, origen, h = _decidir_celda(db_path, out_dir, model_dir,
+                                                celda, rehacer, adoptar)
+                pasos.append(Paso(combinacion=nombre, valores=dict(valores),
+                                  celda=celda, model_dir=model_dir, huella=h,
+                                  via=via, origen=origen))
+    return _repartir_construcciones(pasos)
+
+
+def _repartir_construcciones(pasos: list[Paso]) -> list[Paso]:
+    """Deja una sola propietaria por artefacto; las demas pasan a copiarlo."""
+    propietaria: dict[str, Paso] = {}
+    for paso in pasos:
+        if paso.via != "construye":
+            continue
+        duena = propietaria.get(paso.clave_artefacto)
+        if duena is None:
+            propietaria[paso.clave_artefacto] = paso
+        else:
+            paso.via, paso.origen = "copia", duena.model_dir
+    return pasos
+
+
+def construir_plan(
+    pasos: list[Paso], db_path: Path, trabajos: int = 1, rehacer: bool = False,
+) -> dict[str, int]:
+    """Ajusta los artefactos que faltan (en paralelo) y reparte las copias.
+
+    Dos etapas, en este orden: primero se ajusta cada artefacto DISTINTO —son
+    independientes entre si, asi que van al pool— y despues se copian a las demas
+    combinaciones que lo necesitan. Las copias van en serie y en el proceso padre:
+    son segundos de E/S frente a los minutos de un ajuste, y hacerlas al final
+    garantiza que la propietaria ya ha terminado.
+    """
+    conteo = {"en_cache": 0, "copiados": 0, "adoptados": 0, "construidos": 0}
+    for paso in pasos:
+        conteo[_CONTEO[paso.via]] += 1
+
+    ajustes = [p for p in pasos if p.via == "construye"]
+    if ajustes:
+        print(f"\n[construir] {len(ajustes)} artefactos que ajustar "
+              f"(de {len(pasos)} celdas; el resto sale de la cache o de una copia):")
+        for paso in ajustes:
+            _log_via("construye", paso.celda, paso.model_dir, None, rehacer)
+        paralelo.mapear(
+            [paralelo.Tarea(p.nombre, trabajo.construir_celda,
+                            (db_path, p.model_dir, p.celda, p.valores, p.huella))
+             for p in ajustes],
+            trabajos, etiqueta="ajustes",
+        )
+    else:
+        print(f"\n[construir] nada que ajustar: las {len(pasos)} celdas salen de "
+              f"la cache o de una copia.")
+
+    copias = [p for p in pasos if p.via == "copia"]
+    for paso in copias:
+        _copiar_artefacto(paso.origen, paso.model_dir, paso.celda.stem)
+    if copias:
+        print(f"[construir] {len(copias)} artefactos copiados entre combinaciones.")
+    return conteo
+
+
+# --------------------------------------------------------------------------- #
+# Evaluacion del plan                                                          #
+# --------------------------------------------------------------------------- #
+
+def _orden_informe(
+    formulaciones: tuple[str, ...], entidades: tuple[str, ...],
+    normalizaciones: tuple[str, ...] = ecfg.NORMALIZACIONES,
+) -> list[Celda]:
+    """Orden en que las celdas aparecen en los CSV y el informe.
+
+    Deliberadamente distinto del de ejecucion (`trabajo.celdas`, que agrupa por
+    contexto): este reproduce el de `evaluar.ejecutar`, para que los ficheros de
+    una combinacion salgan igual que si se hubiera evaluado del tiron.
+    """
+    return [Celda(form, entidad, norm)
+            for form in formulaciones
+            for entidad in entidades
+            for norm in normalizaciones]
+
+
+def _agrupar(pasos: list[Paso], reutilizar: bool) -> dict[str, list[Paso]]:
+    """Agrupa las celdas que van a dar exactamente el mismo resultado.
+
+    La clave es la identidad del artefacto (stem + huella): mismos
+    hiperparametros, mismos datos, mismo codigo. Las fases son deterministas
+    (semillas fijas en `src.evaluacion.config`) y se corren con las mismas
+    `--fases`/`--bootstrap` para todas, asi que dos celdas con esa clave igual dan
+    las mismas metricas. Con `reutilizar=False` cada celda es su propio grupo.
+
+    El grupo se evalua con los hiperparametros de SU PRIMERA celda, aunque las
+    demas combinaciones tengan otros: los que difieren estan fuera del alcance de
+    esa celda (`huella.alcance`) —es justo lo que permite agruparlas— y no entran
+    en ningun numero que produzcan sus fases.
+    """
+    grupos: dict[str, list[Paso]] = {}
+    for paso in pasos:
+        clave = paso.clave_artefacto if reutilizar else paso.nombre
+        grupos.setdefault(clave, []).append(paso)
+    return grupos
+
+
+def evaluar_plan(
+    pasos: list[Paso],
+    db_path: Path,
+    fases_sel: set[str],
+    bootstrap: int,
+    trabajos: int = 1,
+    reutilizar: bool = True,
+    formulaciones: tuple[str, ...] = ecfg.FORMULACIONES,
+    entidades: tuple[str, ...] = ecfg.ENTIDADES,
+    normalizaciones: tuple[str, ...] = ecfg.NORMALIZACIONES,
+) -> dict[str, dict]:
+    """Evalua todas las celdas del plan y devuelve {combinacion -> tabla `salida`}.
+
+    Una tarea por grupo de celdas equivalentes (ver `_agrupar`) mas, si se pide la
+    Fase 3, una tarea por combinacion. El reparto de un resultado entre las celdas
+    de su grupo es literal: son las mismas filas, y la combinacion no aparece en
+    ellas (la añaden `escribir_csv` y `_tabla_larga_csv` a partir de la clave del
+    diccionario).
+    """
+    grupos = _agrupar(pasos, reutilizar)
+    detalle = trabajos <= 1          # solo hay consola que refrescar en serie
+
+    tareas = []
+    for grupo in grupos.values():
+        lider = grupo[0]
+        tareas.append(paralelo.Tarea(
+            lider.nombre, trabajo.evaluar_celda,
+            (db_path, lider.model_dir, lider.celda, lider.valores, fases_sel,
+             bootstrap, detalle),
+        ))
+    ahorro = len(pasos) - len(tareas)
+    print(f"\n[evaluar] {len(pasos)} celdas | fases {sorted(fases_sel)} | "
+          f"bootstrap B={bootstrap}"
+          + (f" | {ahorro} se reutilizan de otra combinacion (misma huella)"
+             if ahorro else ""))
+    valores = paralelo.mapear(tareas, trabajos, etiqueta="evaluaciones")
+
+    por_celda: dict[tuple[str, Celda], dict] = {}
+    for grupo in grupos.values():
+        salida = valores[grupo[0].nombre]
+        for paso in grupo:
+            por_celda[(paso.combinacion, paso.celda)] = salida
+
+    resultados: dict[str, dict] = {}
+    for combinacion in dict.fromkeys(p.combinacion for p in pasos):
+        salida = evaluar.tablas_vacias()
+        for celda in _orden_informe(formulaciones, entidades, normalizaciones):
+            parcial = por_celda.get((combinacion, celda))
+            if parcial is None:
+                continue
+            for tabla, filas in parcial.items():
+                salida[tabla].extend(filas)
+        resultados[combinacion] = salida
+
+    if "3" in fases_sel:
+        _evaluar_fase3(pasos, db_path, resultados, trabajos, reutilizar,
+                       formulaciones, entidades, normalizaciones, detalle)
+    return resultados
+
+
+def _evaluar_fase3(
+    pasos: list[Paso], db_path: Path, resultados: dict[str, dict],
+    trabajos: int, reutilizar: bool,
+    formulaciones: tuple[str, ...], entidades: tuple[str, ...],
+    normalizaciones: tuple[str, ...], detalle: bool,
+) -> None:
+    """Añade la Fase 3 (triangulacion) a cada combinacion, como tarea aparte.
+
+    No cabe en una celda: compara entre si las S de todos los modelos de la
+    combinacion. Su identidad, y por tanto su deduplicacion, es el conjunto de
+    huellas de esos modelos.
+    """
+    por_combinacion: dict[str, list[Paso]] = {}
+    for paso in pasos:
+        por_combinacion.setdefault(paso.combinacion, []).append(paso)
+
+    grupos: dict[str, list[str]] = {}
+    for nombre, suyos in por_combinacion.items():
+        clave = (json.dumps(sorted(p.clave_artefacto for p in suyos))
+                 if reutilizar else nombre)
+        grupos.setdefault(clave, []).append(nombre)
+
+    tareas = []
+    for combinaciones_iguales in grupos.values():
+        lider = combinaciones_iguales[0]
+        model_dir = por_combinacion[lider][0].model_dir
+        valores = por_combinacion[lider][0].valores
+        tareas.append(paralelo.Tarea(
+            f"{lider} fase3", trabajo.evaluar_fase3,
+            (db_path, model_dir, valores, formulaciones, entidades,
+             normalizaciones, detalle),
+        ))
+    print(f"\n[evaluar] Fase 3: {len(tareas)} triangulaciones para "
+          f"{len(por_combinacion)} combinaciones.")
+    filas = paralelo.mapear(tareas, trabajos, etiqueta="triangulaciones")
+
+    for combinaciones_iguales in grupos.values():
+        for nombre in combinaciones_iguales:
+            resultados[nombre]["f3"] = filas[f"{combinaciones_iguales[0]} fase3"]
+
+
+def escribir_combinacion(
+    nombre: str, salida: dict, out_dir: Path, con_figuras: bool = True
+) -> None:
+    """Vuelca los CSV (y las figuras) de una combinacion en `<out>/<nombre>/`."""
+    var_dir = Path(out_dir) / nombre
+    var_dir.mkdir(parents=True, exist_ok=True)
+    # La combinacion va como columna en los CSV: los ficheros de dos de ellas se
+    # llaman igual y contienen los mismos nombres de modelo, asi que sin ella
+    # solo los distingue la carpeta que los contiene.
+    evaluar.escribir_csv(salida, var_dir, {"combinacion": nombre})
+    if con_figuras:
+        evaluar.escribir_figuras(salida, var_dir)
 
 
 def evaluar_combinacion(
@@ -364,16 +691,20 @@ def evaluar_combinacion(
     out_dir: Path,
     fases_sel: set[str],
     bootstrap: int,
-    roles: dict,
-    minutos: dict,
     con_figuras: bool = True,
     rehacer: bool = False,
     adoptar: bool = False,
     formulaciones: tuple[str, ...] = ecfg.FORMULACIONES,
     entidades: tuple[str, ...] = ecfg.ENTIDADES,
+    normalizaciones: tuple[str, ...] = ecfg.NORMALIZACIONES,
 ) -> dict:
-    """Construye y evalua una combinacion completa; devuelve la tabla `salida`."""
-    var_dir = out_dir / nombre
+    """Construye y evalua UNA combinacion de principio a fin, en este proceso.
+
+    Camino de una sola combinacion, sin pool ni deduplicacion entre combinaciones
+    (no hay ninguna otra con la que compartir). `main` no pasa por aqui: planifica
+    todas juntas para poder compartir el trabajo. Devuelve la tabla `salida`.
+    """
+    var_dir = Path(out_dir) / nombre
     model_dir = var_dir / "modelo"
     var_dir.mkdir(parents=True, exist_ok=True)
 
@@ -384,30 +715,21 @@ def evaluar_combinacion(
     with _config_temporal(valores):
         print("[construir] rejilla de modelos ...")
         conteo = _construir_grid(db_path, model_dir, out_dir, rehacer, adoptar,
-                                 formulaciones, entidades)
+                                 formulaciones, entidades, normalizaciones)
         print("    " + ", ".join(f"{v} {k}" for k, v in conteo.items() if v))
-
-        modelos = evaluar.cargar_modelos(model_dir, formulaciones, entidades)
-        if not modelos:
+        celdas = [c for c in trabajo.celdas(formulaciones, entidades, normalizaciones)
+                  if huella.artefacto_completo(model_dir, c.stem)]
+        if not celdas:
             raise SystemExit(f"No se construyo ningun modelo para {nombre!r}")
 
-        n_ctx = len(entidades) * len(ecfg.NORMALIZACIONES)
-        total = n_ctx + evaluar._pasos_totales(len(modelos), fases_sel, bootstrap)
-        prog = evaluar.Progreso(total)
-        print(f"[evaluar] {len(modelos)} modelos | fases {sorted(fases_sel)} | "
-              f"bootstrap B={bootstrap} | {total} pasos.\n")
-
-        ctxs = evaluar.crear_contextos(db_path, prog, entidades)
-        salida = evaluar.ejecutar(
-            modelos, ctxs, roles, minutos, fases_sel, bootstrap, prog
-        )
-
-    # La combinacion va como columna en los CSV: los ficheros de dos de ellas se
-    # llaman igual y contienen los mismos nombres de modelo, asi que sin ella
-    # solo los distingue la carpeta que los contiene.
-    evaluar.escribir_csv(salida, var_dir, {"combinacion": nombre})
-    if con_figuras:
-        evaluar.escribir_figuras(salida, var_dir)
+    pasos = [Paso(combinacion=nombre, valores=dict(valores), celda=celda,
+                  model_dir=model_dir, huella={}, via="cache")
+             for celda in celdas]
+    salida = evaluar_plan(pasos, db_path, fases_sel, bootstrap, trabajos=1,
+                          reutilizar=False, formulaciones=formulaciones,
+                          entidades=entidades,
+                          normalizaciones=normalizaciones)[nombre]
+    escribir_combinacion(nombre, salida, out_dir, con_figuras)
     return salida
 
 
@@ -596,9 +918,9 @@ def _seccion_combinaciones(L: list[str], reg: dict, ejes: list[str],
 
     L.append("## Combinaciones (columnas de las tablas)\n")
     L.append("Todas las combinaciones ACUMULADAS en esta carpeta, no solo las de la "
-             "ultima corrida. El nombre `vNN` identifica una CONFIGURACION (se "
+             "ultima ejecucion. El nombre `vNN` identifica una CONFIGURACION (se "
              "asigna en `combinaciones.json`), asi que significa lo mismo en todas "
-             "las corridas y en todas las figuras de la carpeta.\n")
+             "las ejecuciones y en todas las figuras de la carpeta.\n")
     if not ejes:
         L.append("No hay hiperparametros declarados: una sola combinacion, con la "
                  "configuracion por defecto de `src/similitud/config.py`.\n")
@@ -606,8 +928,8 @@ def _seccion_combinaciones(L: list[str], reg: dict, ejes: list[str],
 
     L.append("| combinacion | " + " | ".join(ejes) + " | evaluada |")
     L.append("|" + "---|" * (len(ejes) + 2))
-    # Marcar "esta corrida" solo distingue algo si la carpeta trae ademas
-    # combinaciones de corridas anteriores.
+    # Marcar "esta ejecucion" solo distingue algo si la carpeta trae ademas
+    # combinaciones de ejecuciones anteriores.
     marcar = bool(set(configs) - evaluadas)
     for nombre, config in configs.items():
         # Negrita = valor distinto del default del repo. Una combinacion puede
@@ -619,8 +941,8 @@ def _seccion_combinaciones(L: list[str], reg: dict, ejes: list[str],
             valor = config.get(eje)
             distinto = hasattr(scfg, eje) and valor != getattr(scfg, eje)
             celdas.append(f"**`{valor}`**" if distinto else f"`{valor}`")
-        cuando = proc.get(nombre, {}).get("corrida", "?")
-        marca = (f"{cuando} *(esta corrida)*"
+        cuando = proc.get(nombre, {}).get(registro.CAMPO_FECHA, "?")
+        marca = (f"{cuando} *(esta ejecucion)*"
                  if marcar and nombre in evaluadas else cuando)
         L.append(f"| {nombre} | " + " | ".join(celdas) + f" | {marca} |")
 
@@ -635,7 +957,7 @@ def _seccion_combinaciones(L: list[str], reg: dict, ejes: list[str],
     if not registro.homogeneo(reg):
         L.append("> **Aviso**: las combinaciones acumuladas no se evaluaron todas "
                  "con la misma BD ni con el mismo codigo del nucleo numerico (ver "
-                 "`combinaciones.json`). Las metricas de corridas distintas se "
+                 "`combinaciones.json`). Las metricas de ejecuciones distintas se "
                  "comparan aqui en la misma tabla, pero no son estrictamente "
                  "comparables: para homogeneizarlas hay que volver a evaluar las "
                  "combinaciones afectadas (deben estar en el producto cartesiano "
@@ -682,8 +1004,8 @@ def escribir_resumen_barrido(
     """Genera `resumen_barrido.md`: comparativa entre combinaciones, sin umbrales.
 
     Trabaja sobre la tabla larga ACUMULADA de la carpeta, no sobre los resultados
-    en memoria de esta corrida: es lo que permite que el resumen incluya las
-    combinaciones que se evaluaron en corridas anteriores.
+    en memoria de esta ejecucion: es lo que permite que el resumen incluya las
+    combinaciones que se evaluaron en ejecuciones anteriores.
     """
     configs = registro.hiperparametros(reg)
     ejes = meta["ejes"]
@@ -692,11 +1014,11 @@ def escribir_resumen_barrido(
     L: list[str] = []
     L.append("# Barrido de hiperparametros — comparativa entre combinaciones\n")
     L.append(f"Generado el {meta['fecha']}. La carpeta acumula **{len(configs)} "
-             f"combinaciones**; esta corrida evaluo {len(evaluadas)} de ellas "
+             f"combinaciones**; esta ejecucion evaluo {len(evaluadas)} de ellas "
              f"(fases {meta['fases']}, bootstrap B={meta['bootstrap']}) y las "
-             "demas conservan las metricas de la corrida en que se evaluaron.\n")
+             "demas conservan las metricas de la ejecucion en que se evaluaron.\n")
     if meta.get("rejilla"):
-        L.append(f"Rejilla construida y evaluada en esta corrida: "
+        L.append(f"Rejilla construida y evaluada en esta ejecucion: "
                  f"{meta['rejilla']}.\n")
 
     _seccion_combinaciones(L, reg, ejes, evaluadas)
@@ -762,6 +1084,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--entidades", type=str, default=",".join(ecfg.ENTIDADES),
                    help="Entidades de la rejilla (coma-separado). "
                         f"Disponibles: {', '.join(ecfg.ENTIDADES)}.")
+    p.add_argument("--normalizaciones", type=str,
+                   default=",".join(ecfg.NORMALIZACIONES),
+                   help="Normalizaciones de la rejilla (coma-separado). "
+                        f"Disponibles: {', '.join(ecfg.NORMALIZACIONES)}. Por "
+                        "defecto se construyen y evaluan LAS DOS, que es lo que "
+                        "permite compararlas; acotarla a una divide por dos el "
+                        "coste cuando la comparacion no es el objetivo de esa "
+                        "tanda.")
     p.add_argument("--fases", type=str, default="0,1,5",
                    help="Fases a ejecutar por combinacion (coma-separado). El "
                         "barrido multiplica el coste, por eso omite por defecto "
@@ -770,6 +1100,20 @@ def main(argv: list[str] | None = None) -> None:
                    help="Remuestreos de la Fase 2 (0 la omite; solo aplica si se "
                         "incluye la fase 2).")
     p.add_argument("--sin-figuras", action="store_true")
+    p.add_argument("--trabajos", type=str, default="1",
+                   help=f"Procesos que construyen y evaluan a la vez ('{paralelo.AUTO}' "
+                        "= uno por nucleo). Las celdas (combinacion x formulacion x "
+                        "entidad x normalizacion) son independientes, asi que se "
+                        "reparten entre ellos. Ojo con la memoria: cada trabajador "
+                        "tiene su propia copia de la matriz de features y de la S que "
+                        "este reconstruyendo. Con 1 (por defecto) no se crea ningun "
+                        "proceso y el log sale en directo.")
+    p.add_argument("--sin-reutilizar-metricas", action="store_true",
+                   help="Evalua cada celda por separado aunque otra combinacion "
+                        "tenga un modelo con la MISMA huella. Por defecto se evalua "
+                        "una vez por huella y el resultado se reparte: el modelo es "
+                        "el mismo artefacto y las fases son deterministas. Esta flag "
+                        "es la forma de comprobarlo (y de rehacerlo todo si se duda).")
     p.add_argument("--rehacer", action="store_true",
                    help="Ignora la cache y reconstruye todos los modelos.")
     p.add_argument("--adoptar-existentes", action="store_true",
@@ -782,8 +1126,11 @@ def main(argv: list[str] | None = None) -> None:
     args = p.parse_args(argv)
 
     _validar_hiperparametros()
+    trabajos = paralelo.resolver_trabajos(args.trabajos)
     formulaciones = _subconjunto(args.formulaciones, ecfg.FORMULACIONES, "formulaciones")
     entidades = _subconjunto(args.entidades, ecfg.ENTIDADES, "entidades")
+    normalizaciones = _subconjunto(args.normalizaciones, ecfg.NORMALIZACIONES,
+                                   "normalizaciones")
     fases_sel = {s.strip() for s in args.fases.split(",") if s.strip()}
 
     db_path = args.db
@@ -791,7 +1138,7 @@ def main(argv: list[str] | None = None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # La carpeta es acumulativa: su registro decide como se llama cada
-    # configuracion, para que los `vNN` de esta corrida sigan designando lo mismo
+    # configuracion, para que los `vNN` de esta ejecucion sigan designando lo mismo
     # que los de las anteriores (ver `registro.py`).
     reg = registro.cargar(out_dir)
     ejes = _ejes_publicados(registro.ejes(reg))
@@ -807,7 +1154,7 @@ def main(argv: list[str] | None = None) -> None:
     seleccion = registro.nombrar(reg, efectivas, ejes)
     nuevas = [n for n in seleccion if n not in conocidas]
 
-    print(f"{len(seleccion)} combinaciones en esta corrida "
+    print(f"{len(seleccion)} combinaciones en esta ejecucion "
           f"({len(nuevas)} nuevas, {len(seleccion) - len(nuevas)} ya conocidas); "
           f"{len(reg['combinaciones'])} acumuladas en {out_dir}:")
     for nombre, valores in seleccion.items():
@@ -815,25 +1162,32 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  {nombre}: {_fmt_valores(valores)}{marca}")
 
     t0 = time.perf_counter()
-    print("\nCargando datos auxiliares (roles y minutos)...")
-    roles = datos.rol_por_jugador(db_path)
-    minutos = datos.minutos_por_jugador(db_path)
 
-    resultados: dict = {}
-    for nombre, valores in seleccion.items():
-        resultados[nombre] = evaluar_combinacion(
-            nombre, valores, db_path, out_dir, fases_sel, args.bootstrap,
-            roles, minutos, con_figuras=not args.sin_figuras,
-            rehacer=args.rehacer, adoptar=args.adoptar_existentes,
-            formulaciones=formulaciones, entidades=entidades,
-        )
+    # Todo el plan antes de tocar nada: es lo que permite ajustar y evaluar una
+    # sola vez lo que varias combinaciones comparten, y repartir el resto.
+    print("\nPlanificando la ejecucion (huella de cada celda)...")
+    pasos = planificar(seleccion, db_path, out_dir, formulaciones, entidades,
+                       normalizaciones, args.rehacer, args.adoptar_existentes)
+
+    conteo = construir_plan(pasos, db_path, trabajos, rehacer=args.rehacer)
+    print("[construir] " + ", ".join(f"{v} {k}" for k, v in conteo.items() if v))
+
+    resultados = evaluar_plan(
+        pasos, db_path, fases_sel, args.bootstrap, trabajos,
+        reutilizar=not args.sin_reutilizar_metricas,
+        formulaciones=formulaciones, entidades=entidades,
+        normalizaciones=normalizaciones,
+    )
+    for nombre, salida in resultados.items():
+        escribir_combinacion(nombre, salida, out_dir,
+                             con_figuras=not args.sin_figuras)
 
     fecha = time.strftime("%Y-%m-%d %H:%M")
     registro.anotar(reg, list(seleccion),
-                    {"corrida": fecha, **huella.procedencia(db_path)})
+                    {registro.CAMPO_FECHA: fecha, **huella.procedencia(db_path)})
     registro.guardar(out_dir, reg)
 
-    # Las metricas de esta corrida sustituyen a las suyas anteriores; las de las
+    # Las metricas de esta ejecucion sustituyen a las suyas anteriores; las de las
     # combinaciones que no se han vuelto a evaluar se conservan. Es lo que hace
     # que la superficie 3D se dibuje con TODOS los puntos de la carpeta.
     previas = registro.leer_metricas(out_dir)
@@ -848,7 +1202,7 @@ def main(argv: list[str] | None = None) -> None:
         "evaluadas": list(seleccion),
         "rejilla": f"formulaciones {list(formulaciones)} x entidades "
                    f"{list(entidades)} x normalizaciones "
-                   f"{list(ecfg.NORMALIZACIONES)}",
+                   f"{list(normalizaciones)}",
     })
     dt = time.perf_counter() - t0
     n_combis = len(set(acumuladas["combinacion"])) if not acumuladas.empty else 0

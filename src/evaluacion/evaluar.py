@@ -59,11 +59,18 @@ class Progreso:
     faltan): orientativa, no exacta, porque los pasos no cuestan lo mismo (el
     bootstrap de la Fase 2 domina). Sirve para saber si quedan segundos o
     minutos, que es lo que se pide.
+
+    ``sub`` habilita el reporte del bucle INTERNO de cada paso (`_SubProgreso`),
+    que refresca una linea en sitio varias veces por segundo. Se apaga cuando la
+    salida no va a una consola sino a un buffer que se imprimira entero al final
+    (los trabajadores del barrido en paralelo): ahi los refrescos no se
+    sobrescriben unos a otros, se acumulan como miles de lineas.
     """
 
-    def __init__(self, total: int):
+    def __init__(self, total: int, sub: bool = True):
         self.total = max(int(total), 1)
         self.hecho = 0
+        self.sub = bool(sub)
         self.t0 = time.perf_counter()
 
     @contextmanager
@@ -96,6 +103,17 @@ def _quizas_paso(prog: "Progreso | None", desc: str):
     else:
         with prog.paso(desc):
             yield
+
+
+def _quizas_sub(prog: "Progreso | None", etiqueta: str) -> "_SubProgreso | None":
+    """Reportero del bucle interno, o None si no procede seguirlo.
+
+    Un unico sitio donde decidirlo: sin contador (llamadas sueltas) no hay nada
+    que refrescar, y con `Progreso.sub` desactivado la salida no es una consola
+    (ver `Progreso`)."""
+    if prog is None or not prog.sub:
+        return None
+    return _SubProgreso(etiqueta)
 
 
 class _SubProgreso:
@@ -134,16 +152,18 @@ def cargar_modelos(
     model_dir: Path,
     formulaciones: tuple[str, ...] = config.FORMULACIONES,
     entidades: tuple[str, ...] = config.ENTIDADES,
+    normalizaciones: tuple[str, ...] = config.NORMALIZACIONES,
 ) -> dict:
     """Carga los artefactos presentes en la rejilla (clave = tripleta).
 
-    `formulaciones`/`entidades` acotan la rejilla; por defecto, entera. Acotarla
-    evita avisar de modelos que no se pidieron.
+    `formulaciones`/`entidades`/`normalizaciones` acotan la rejilla; por defecto,
+    entera. Acotarla evita avisar de modelos que no se pidieron —y, en el barrido,
+    cargar los que dejo en disco una ejecucion anterior con otro alcance.
     """
     modelos: dict = {}
     for form in formulaciones:
         for entidad in entidades:
-            for norm in config.NORMALIZACIONES:
+            for norm in normalizaciones:
                 try:
                     modelos[(form, entidad, norm)] = cargar_modelo(
                         model_dir, form, entidad, norm
@@ -191,13 +211,90 @@ def _pasos_totales(n_modelos: int, fases_sel: set[str], bootstrap: int) -> int:
     return (1 if "3" in fases_sel else 0) + n_modelos * por_combo
 
 
+# Tablas que produce la evaluacion. `f3` es la unica que NO sale de un modelo
+# suelto: compara modelos entre si, asi que la llena `ejecutar` y no
+# `evaluar_modelo`.
+TABLAS = ("f0", "f1", "f1_estratos", "f2", "f3", "f4", "f5", "face")
+
+
+def tablas_vacias() -> dict[str, list]:
+    return {k: [] for k in TABLAS}
+
+
+def evaluar_modelo(
+    modelo, ctx, form: str, entidad: str, norm: str,
+    roles: dict, minutos: dict, fases_sel: set[str], bootstrap: int,
+    prog: "Progreso | None" = None, sufijo: str = "",
+) -> dict[str, list]:
+    """Las fases de UN modelo; devuelve sus filas, con las mismas tablas que
+    `ejecutar` (todas menos `f3`, que necesita varios modelos a la vez).
+
+    Es la unidad indivisible de la evaluacion: todo lo que hace depende solo de
+    este modelo y de su contexto. Por eso es tambien la unidad que reparte el
+    barrido entre procesos (`src.evaluacion.trabajo`), y por eso vive aqui y no
+    alli: el barrido y `evaluar` tienen que medir exactamente lo mismo.
+    """
+    salida = tablas_vacias()
+    etiqueta = _clave(form, entidad, norm)
+    suf = f"{etiqueta} {sufijo}".strip()
+    base = {"modelo": etiqueta, "formulacion": form,
+            "entidad": entidad, "normalizacion": norm}
+
+    if "0" in fases_sel:
+        with _quizas_paso(prog, f"[Fase 0] sanity {suf}"):
+            rep = _quizas_sub(prog, "entidad")
+            salida["f0"].append(
+                {**base, **fases.fase0_sanity(modelo, roles, ctx, form, rep)})
+            if norm == "por_liga":
+                nombres = _queries_face(modelo, minutos)
+                salida["face"].append(
+                    {"modelo": etiqueta,
+                     "lineas": fases.face_validity(modelo, nombres)}
+                )
+
+    if "1" in fases_sel:
+        with _quizas_paso(prog, f"[Fase 1] auto-similitud {suf}"):
+            rep = _quizas_sub(prog, "SLIM obs" if form == "2" else "OT nube")
+            res = fases.fase1_autosimilitud(ctx, form, rep)
+            salida["f1"].append({**base, "direccion": "global", **res["global"]})
+            salida["f1"].append({**base, "direccion": "A->B", **res["A->B"]})
+            salida["f1"].append({**base, "direccion": "B->A", **res["B->A"]})
+            for nombre, m in res["estratos"].items():
+                salida["f1_estratos"].append({**base, "estrato": nombre, **m})
+            if res["denoising"] is not None:
+                d = res["denoising"]
+                salida["f4"].append({
+                    **base,
+                    "mrr_pre": d["pre"]["mrr"], "top1_pre": d["pre"]["top1"],
+                    "mrr_post": d["post"]["mrr"], "top1_post": d["post"]["top1"],
+                    "delta_mrr": d["delta_mrr"],
+                    "delta_rr_medio": d["delta_rr_medio"], "p_pareado": d["p_pareado"],
+                })
+
+    if "2" in fases_sel and bootstrap > 0:
+        with _quizas_paso(prog, f"[Fase 2] estabilidad {suf} (B={bootstrap})"):
+            reportar = _quizas_sub(prog, "bootstrap")
+            salida["f2"].append({
+                **base,
+                **fases.fase2_estabilidad(ctx, form, modelo.S, bootstrap, reportar),
+            })
+
+    if "5" in fases_sel:
+        with _quizas_paso(prog, f"[Fase 5] downstream {suf}"):
+            rep = _quizas_sub(prog, "entidad")
+            salida["f5"].append(
+                {**base, **fases.fase5_downstream(modelo, roles, minutos, rep)}
+            )
+
+    return salida
+
+
 def ejecutar(
     modelos: dict, ctxs: dict, roles: dict, minutos: dict,
     fases_sel: set[str], bootstrap: int, prog: "Progreso | None" = None,
 ) -> dict:
     """Corre las fases seleccionadas y devuelve tablas (listas de dicts)."""
-    salida = {k: [] for k in
-              ("f0", "f1", "f1_estratos", "f2", "f3", "f4", "f5", "face")}
+    salida = tablas_vacias()
 
     combos = [(f, e, n) for f in config.FORMULACIONES
               for e in config.ENTIDADES for n in config.NORMALIZACIONES
@@ -205,63 +302,17 @@ def ejecutar(
 
     if "3" in fases_sel:
         with _quizas_paso(prog, "[Fase 3] triangulacion (test de Mantel)"):
-            rep = _SubProgreso("comparacion") if prog is not None else None
-            salida["f3"] = fases.fase3_triangulacion(modelos, ctxs, rep)
+            salida["f3"] = fases.fase3_triangulacion(
+                modelos, ctxs, _quizas_sub(prog, "comparacion"))
 
     for i, (form, entidad, norm) in enumerate(combos, start=1):
-        modelo = modelos[(form, entidad, norm)]
-        ctx = ctxs[(entidad, norm)]
-        etiqueta = _clave(form, entidad, norm)
-        suf = f"{etiqueta} (modelo {i}/{len(combos)})"
-        base = {"modelo": etiqueta, "formulacion": form,
-                "entidad": entidad, "normalizacion": norm}
-
-        if "0" in fases_sel:
-            with _quizas_paso(prog, f"[Fase 0] sanity {suf}"):
-                rep = _SubProgreso("entidad") if prog is not None else None
-                salida["f0"].append(
-                    {**base, **fases.fase0_sanity(modelo, roles, ctx, form, rep)})
-                if norm == "por_liga":
-                    nombres = _queries_face(modelo, minutos)
-                    salida["face"].append(
-                        {"modelo": etiqueta,
-                         "lineas": fases.face_validity(modelo, nombres)}
-                    )
-
-        if "1" in fases_sel:
-            with _quizas_paso(prog, f"[Fase 1] auto-similitud {suf}"):
-                etiq_sub = "SLIM obs" if form == "2" else "OT nube"
-                rep = _SubProgreso(etiq_sub) if prog is not None else None
-                res = fases.fase1_autosimilitud(ctx, form, rep)
-                salida["f1"].append({**base, "direccion": "global", **res["global"]})
-                salida["f1"].append({**base, "direccion": "A->B", **res["A->B"]})
-                salida["f1"].append({**base, "direccion": "B->A", **res["B->A"]})
-                for nombre, m in res["estratos"].items():
-                    salida["f1_estratos"].append({**base, "estrato": nombre, **m})
-                if res["denoising"] is not None:
-                    d = res["denoising"]
-                    salida["f4"].append({
-                        **base,
-                        "mrr_pre": d["pre"]["mrr"], "top1_pre": d["pre"]["top1"],
-                        "mrr_post": d["post"]["mrr"], "top1_post": d["post"]["top1"],
-                        "delta_mrr": d["delta_mrr"],
-                        "delta_rr_medio": d["delta_rr_medio"], "p_pareado": d["p_pareado"],
-                    })
-
-        if "2" in fases_sel and bootstrap > 0:
-            with _quizas_paso(prog, f"[Fase 2] estabilidad {suf} (B={bootstrap})"):
-                reportar = _SubProgreso("bootstrap") if prog is not None else None
-                salida["f2"].append({
-                    **base,
-                    **fases.fase2_estabilidad(ctx, form, modelo.S, bootstrap, reportar),
-                })
-
-        if "5" in fases_sel:
-            with _quizas_paso(prog, f"[Fase 5] downstream {suf}"):
-                rep = _SubProgreso("entidad") if prog is not None else None
-                salida["f5"].append(
-                    {**base, **fases.fase5_downstream(modelo, roles, minutos, rep)}
-                )
+        parcial = evaluar_modelo(
+            modelos[(form, entidad, norm)], ctxs[(entidad, norm)],
+            form, entidad, norm, roles, minutos, fases_sel, bootstrap, prog,
+            sufijo=f"(modelo {i}/{len(combos)})",
+        )
+        for tabla, filas in parcial.items():
+            salida[tabla].extend(filas)
 
     return salida
 

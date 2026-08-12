@@ -3,7 +3,7 @@
 Lo que este modulo tiene que garantizar es que relanzar el barrido sobre la misma
 carpeta NO sea destructivo: que `v07` siga significando lo mismo y que las
 metricas de las combinaciones que no se han vuelto a evaluar sigan ahi. Casi todas
-las pruebas describen ese escenario de dos corridas.
+las pruebas describen ese escenario de dos ejecuciones.
 """
 
 from __future__ import annotations
@@ -263,20 +263,37 @@ class TestProcedencia:
     def test_anotar_marca_las_combinaciones_evaluadas(self) -> None:
         reg = registro.vacio()
         registro.nombrar(reg, [{"a": 1}])
-        registro.anotar(reg, ["v01"], {"corrida": "2026-01-01", "datos": {}, "codigo": {}})
-        assert registro.procedencias(reg)["v01"]["corrida"] == "2026-01-01"
+        registro.anotar(reg, ["v01"],
+                        {registro.CAMPO_FECHA: "2026-01-01", "datos": {}, "codigo": {}})
+        assert registro.procedencias(reg)["v01"][registro.CAMPO_FECHA] == "2026-01-01"
+
+    def test_una_carpeta_con_el_campo_de_fecha_antiguo_conserva_la_fecha(
+        self, tmp_path: Path
+    ) -> None:
+        """El campo se llamaba antes de otra manera. Al leer la carpeta se
+        renombra: nadie va a reevaluar cientos de combinaciones por eso, y la
+        columna `evaluada` del resumen tiene que seguir diciendo cuando fue.
+        """
+        ruta = registro.ruta(tmp_path)
+        ruta.write_text(json.dumps({"version": registro.VERSION, "combinaciones": {
+            "v01": {"hiperparametros": {"a": 1}, "corrida": "2026-01-01 10:00"}}}),
+            encoding="utf-8")
+        reg = registro.cargar(tmp_path)
+        assert reg["combinaciones"]["v01"][registro.CAMPO_FECHA] == "2026-01-01 10:00"
+        assert "corrida" not in reg["combinaciones"]["v01"]
 
     def test_la_procedencia_no_incluye_los_hiperparametros(self) -> None:
         reg = registro.vacio()
         registro.nombrar(reg, [{"a": 1}])
-        registro.anotar(reg, ["v01"], {"corrida": "hoy"})
+        registro.anotar(reg, ["v01"], {registro.CAMPO_FECHA: "hoy"})
         assert "hiperparametros" not in registro.procedencias(reg)["v01"]
 
-    def test_una_carpeta_de_una_sola_corrida_es_homogenea(self) -> None:
+    def test_una_carpeta_de_una_sola_ejecucion_es_homogenea(self) -> None:
         reg = registro.vacio()
         registro.nombrar(reg, [{"a": 1}, {"a": 2}])
         registro.anotar(reg, ["v01", "v02"],
-                        {"corrida": "hoy", "datos": {"bytes": 1}, "codigo": {"2": "x"}})
+                        {registro.CAMPO_FECHA: "hoy", "datos": {"bytes": 1},
+                         "codigo": {"2": "x"}})
         assert registro.homogeneo(reg)
 
     def test_avisa_cuando_se_acumulan_metricas_de_mundos_distintos(self) -> None:
@@ -382,8 +399,8 @@ class TestMetricasAcumuladas:
         fundida = registro.acumular(previa, nueva)
         assert fundida["valor"].tolist() == [0.9]
 
-    def test_lo_que_esta_corrida_no_toca_se_conserva(self) -> None:
-        """Es lo que permite barrer en tandas: una corrida acotada con
+    def test_lo_que_esta_ejecucion_no_toca_se_conserva(self) -> None:
+        """Es lo que permite barrer en tandas: una ejecucion acotada con
         `--formulaciones 5` no puede borrar las filas F2 de esa combinacion.
         """
         previa = pd.DataFrame([self._fila("v01", "F2_equipo_global", "top1", 0.1)])
@@ -401,7 +418,7 @@ class TestMetricasAcumuladas:
         nueva = pd.DataFrame([self._fila("v01", "F2_equipo_global", "top1", 0.9)])
         assert registro.acumular(pd.DataFrame(), nueva).equals(registro._tipos(nueva))
 
-    def test_una_corrida_sin_resultados_no_borra_lo_acumulado(self) -> None:
+    def test_una_ejecucion_sin_resultados_no_borra_lo_acumulado(self) -> None:
         previa = pd.DataFrame([self._fila("v01", "F2_equipo_global", "top1", 0.1)])
         assert len(registro.acumular(previa, pd.DataFrame())) == 1
 

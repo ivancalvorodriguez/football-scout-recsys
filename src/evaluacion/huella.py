@@ -1,6 +1,6 @@
 """Huella de un modelo: que hiperparametros, datos y codigo lo determinan.
 
-El barrido reconstruia la rejilla entera en cada corrida, aunque la mayoria de
+El barrido reconstruia la rejilla entera en cada ejecucion, aunque la mayoria de
 los modelos fuesen identicos a los de otra combinacion de hiperparametros (un
 cambio en `F2_L1` no toca los modelos F5, y la posicion no toca los de equipo).
 Este modulo permite saltarse esas reconstrucciones: junto a cada artefacto se
@@ -142,6 +142,30 @@ def alcance(formulacion: str, entidad: str) -> list[str]:
     return sorted(attrs)
 
 
+def alcance_datos(entidad: str) -> list[str]:
+    """Atributos que determinan la MATRIZ DE FEATURES de esa entidad.
+
+    Es el subconjunto de `alcance` que no depende de la formulacion: lo que fija
+    `construccion.crear_contexto` (que columnas se derivan, como se recorta el
+    z-score, si entra el bloque de posicion). Un trabajador del barrido lo usa
+    como clave para reutilizar un contexto entre tareas: dos celdas con el mismo
+    alcance de datos comparten la matriz X exactamente, aunque ajusten
+    formulaciones o hiperparametros distintos.
+    """
+    return sorted([*_COMUNES, *_POR_ENTIDAD[entidad]])
+
+
+def alcance_ajuste(formulacion: str, entidad: str) -> list[str]:
+    """Atributos que determinan el AJUSTE, dada ya la matriz de features.
+
+    El complemento de `alcance_datos` dentro de `alcance`. Sirve para saber si la
+    W instancia-instancia cacheada en un contexto reutilizado sigue valiendo: la W
+    depende de los `F2_*`, asi que hay que descartarla en cuanto cambian.
+    """
+    datos = set(alcance_datos(entidad))
+    return [attr for attr in alcance(formulacion, entidad) if attr not in datos]
+
+
 def _hash_codigo(formulacion: str) -> str:
     """sha256 del fuente de los modulos que producen el numero de esa celda."""
     h = hashlib.sha256()
@@ -159,12 +183,12 @@ def _huella_datos(db_path: Path) -> dict:
 def procedencia(db_path: Path) -> dict:
     """Con que datos y que codigo se esta evaluando AHORA (para el barrido acumulado).
 
-    No identifica una celda concreta: identifica la CORRIDA. El barrido lo anota
+    No identifica una celda concreta: identifica la EJECUCION. El barrido lo anota
     junto a cada combinacion que evalua, para poder avisar de que una carpeta
     acumula metricas producidas con una BD o un nucleo numerico distintos (que no
     son comparables entre si aunque compartan tabla). Se hashean SIEMPRE las dos
-    formulaciones, tambien las que esa corrida no construya: si dependiera de
-    `--formulaciones`, dos corridas de la misma carpeta pareceran discrepar solo
+    formulaciones, tambien las que esa ejecucion no construya: si dependiera de
+    `--formulaciones`, dos ejecuciones de la misma carpeta pareceran discrepar solo
     por haberse acotado distinto.
     """
     return {
@@ -291,7 +315,7 @@ def coincide(model_dir: Path, stem: str, h: dict) -> bool:
 # Los modelos construidos antes de que existiera este modulo no tienen huella,
 # asi que por defecto se reconstruyen. `adoptar` permite recuperarlos SI su
 # metadata concuerda con la configuracion vigente: se les escribe la huella y
-# quedan cargados como si los hubiera construido esta corrida. Es una decision
+# quedan cargados como si los hubiera construido esta ejecucion. Es una decision
 # del usuario (`--adoptar-existentes`), no un comportamiento por defecto: hay una
 # parte de la huella que un artefacto viejo no permite verificar (el hash del
 # codigo y la huella de la BD), y adoptarlo equivale a afirmar que ni el nucleo

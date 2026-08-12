@@ -1,7 +1,7 @@
-"""Barrido de verdad: cache de artefactos y carpeta acumulativa entre corridas.
+"""Barrido de verdad: cache de artefactos y carpeta acumulativa entre ejecuciones.
 
 Se construyen y evaluan modelos reales (equipo, que es la entidad barata), porque
-lo que se prueba es justo lo que no se puede simular: que la segunda corrida NO
+lo que se prueba es justo lo que no se puede simular: que la segunda ejecucion NO
 reconstruya nada, que una combinacion copie los artefactos de otra cuando su
 huella coincide, y que relanzar el barrido sobre la misma carpeta conserve los
 nombres `vNN` y las metricas anteriores.
@@ -14,7 +14,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.evaluacion import barrido, datos, huella, registro
+from src.evaluacion import barrido, huella, registro
 from src.similitud import config as scfg
 
 pytestmark = [pytest.mark.integracion, pytest.mark.lento]
@@ -35,7 +35,7 @@ def rejilla_pequena(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, list]]:
 
 
 class TestConstruirGrid:
-    def test_la_primera_corrida_construye_todo(
+    def test_la_primera_ejecucion_construye_todo(
         self, bd_sintetica: Path, tmp_path: Path
     ) -> None:
         conteo = barrido._construir_grid(
@@ -44,7 +44,7 @@ class TestConstruirGrid:
         assert conteo == {"en_cache": 0, "copiados": 0, "adoptados": 0,
                           "construidos": 2}
 
-    def test_la_segunda_corrida_no_reconstruye_nada(
+    def test_la_segunda_ejecucion_no_reconstruye_nada(
         self, bd_sintetica: Path, tmp_path: Path
     ) -> None:
         """Relanzar el barrido sin cambios tiene que costar 0 construcciones."""
@@ -157,14 +157,19 @@ class TestConstruirGrid:
 
 
 class TestEvaluarCombinacion:
+    """El camino de UNA combinacion de principio a fin (sin plan ni pool).
+
+    Los roles y los minutos ya no se le pasan: los carga de la BD el propio
+    trabajador que corre las fases (`src.evaluacion.trabajo`), que es la unica
+    forma de que un proceso hijo los tenga sin mandarselos por la tuberia.
+    """
+
     def test_construye_evalua_y_escribe_los_csv_de_la_combinacion(
         self, bd_sintetica: Path, tmp_path: Path
     ) -> None:
-        roles = datos.rol_por_jugador(bd_sintetica)
-        minutos = datos.minutos_por_jugador(bd_sintetica)
         barrido.evaluar_combinacion(
             "v01", {"F5_EASE_LAMBDA": 25.0}, bd_sintetica, tmp_path,
-            {"0", "1"}, 0, roles, minutos, con_figuras=False,
+            {"0", "1"}, 0, con_figuras=False,
             formulaciones=FORMULACIONES, entidades=ENTIDADES)
         csv = tmp_path / "v01" / "fase0_sanity.csv"
         assert csv.exists()
@@ -173,10 +178,8 @@ class TestEvaluarCombinacion:
     def test_dibuja_las_figuras_de_la_combinacion_si_se_piden(
         self, bd_sintetica: Path, tmp_path: Path
     ) -> None:
-        roles = datos.rol_por_jugador(bd_sintetica)
-        minutos = datos.minutos_por_jugador(bd_sintetica)
         barrido.evaluar_combinacion(
-            "v01", {}, bd_sintetica, tmp_path, {"1"}, 0, roles, minutos,
+            "v01", {}, bd_sintetica, tmp_path, {"1"}, 0,
             con_figuras=True, formulaciones=FORMULACIONES, entidades=ENTIDADES)
         assert (tmp_path / "v01" / "figuras" /
                 "fase1_autosimilitud_top1.png").exists()
@@ -187,11 +190,9 @@ class TestEvaluarCombinacion:
         """Si no lo fijara, todas las combinaciones darian el mismo modelo y el
         barrido compararia columnas identicas sin decirlo.
         """
-        roles = datos.rol_por_jugador(bd_sintetica)
-        minutos = datos.minutos_por_jugador(bd_sintetica)
         barrido.evaluar_combinacion(
             "v01", {"F5_EASE_LAMBDA": 1234.0}, bd_sintetica, tmp_path,
-            {"0"}, 0, roles, minutos, con_figuras=False,
+            {"0"}, 0, con_figuras=False,
             formulaciones=FORMULACIONES, entidades=ENTIDADES)
         h = huella.leer(tmp_path / "v01" / "modelo",
                         barrido._stem("5", "equipo", "por_liga"))
@@ -203,12 +204,89 @@ class TestEvaluarCombinacion:
     ) -> None:
         with pytest.raises(SystemExit, match="No se construyo ningun modelo"):
             barrido.evaluar_combinacion(
-                "v01", {}, bd_sintetica, tmp_path, {"0"}, 0, {}, {},
+                "v01", {}, bd_sintetica, tmp_path, {"0"}, 0,
                 con_figuras=False, formulaciones=(), entidades=())
 
 
+class TestReparteYReutiliza:
+    """Las dos optimizaciones de la ejecucion, contra el mismo barrido hecho a pelo.
+
+    La rejilla es la F2 y la F5 de equipo con un eje de cada una: las cuatro
+    combinaciones tienen solo DOS modelos F2 distintos y DOS F5 distintos, asi que
+    la mitad de las celdas es reutilizable. Lo que se comprueba es que reutilizar y
+    repartir no cambian ni un numero: si cambiaran, el barrido estaria comparando
+    combinaciones con metricas producidas de formas distintas.
+    """
+
+    EJES = [("F2_L1", [0.5, 0.9]), ("F5_EASE_LAMBDA", [10.0, 50.0])]
+
+    def _correr(self, bd: Path, out: Path, *args: str) -> None:
+        barrido.main(["--db", str(bd), "--out", str(out),
+                      "--entidades", "equipo", "--fases", "0,1",
+                      "--bootstrap", "0", "--sin-figuras", *args])
+
+    @pytest.fixture
+    def rejilla(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(barrido, "HIPERPARAMETROS", self.EJES)
+
+    def _metricas(self, out: Path) -> pd.DataFrame:
+        df = registro.leer_metricas(out)
+        return (df.sort_values(["combinacion", "modelo", "fase", "metrica"])
+                  .reset_index(drop=True))
+
+    def test_reutilizar_da_exactamente_las_mismas_metricas(
+        self, bd_sintetica: Path, tmp_path: Path, rejilla
+    ) -> None:
+        """El artefacto es el mismo fichero y las fases son deterministas (semillas
+        fijas), asi que evaluarlo una vez y repartir tiene que dar lo mismo que
+        evaluarlo cuatro."""
+        self._correr(bd_sintetica, tmp_path / "reutiliza")
+        self._correr(bd_sintetica, tmp_path / "cada_una", "--sin-reutilizar-metricas")
+        assert self._metricas(tmp_path / "reutiliza").equals(
+            self._metricas(tmp_path / "cada_una"))
+
+    def test_en_paralelo_da_exactamente_lo_mismo_que_en_serie(
+        self, bd_sintetica: Path, tmp_path: Path, rejilla
+    ) -> None:
+        self._correr(bd_sintetica, tmp_path / "serie")
+        self._correr(bd_sintetica, tmp_path / "paralelo", "--trabajos", "2")
+        assert self._metricas(tmp_path / "serie").equals(
+            self._metricas(tmp_path / "paralelo"))
+
+    def test_dice_cuantas_celdas_se_reutilizan(
+        self, bd_sintetica: Path, tmp_path: Path, rejilla, capsys
+    ) -> None:
+        """4 combinaciones x 2 formulaciones x 2 normalizaciones = 16 celdas, pero
+        solo 8 modelos distintos: cada eje deja intacta a la otra formulacion."""
+        self._correr(bd_sintetica, tmp_path)
+        assert "8 se reutilizan de otra combinacion" in capsys.readouterr().out
+
+    def test_cada_combinacion_acaba_con_sus_cuatro_modelos(
+        self, bd_sintetica: Path, tmp_path: Path, rejilla
+    ) -> None:
+        """Reutilizar metricas no ahorra artefactos: la carpeta de cada
+        combinacion sigue siendo autocontenida (la copia lleva su huella)."""
+        self._correr(bd_sintetica, tmp_path)
+        for nombre in ("v01", "v02", "v03", "v04"):
+            modelo = tmp_path / nombre / "modelo"
+            assert len(list(modelo.glob(f"*{huella.SUFIJO}"))) == 4
+            for celda in barrido.trabajo.celdas(("2", "5"), ("equipo",)):
+                assert huella.artefacto_completo(modelo, celda.stem)
+
+    def test_los_csv_de_una_combinacion_reutilizada_llevan_su_nombre(
+        self, bd_sintetica: Path, tmp_path: Path, rejilla
+    ) -> None:
+        """Las filas se comparten entre combinaciones: la columna `combinacion` la
+        pone quien escribe, asi que no puede quedarse con la del lider del grupo.
+        """
+        self._correr(bd_sintetica, tmp_path)
+        for nombre in ("v01", "v02", "v03", "v04"):
+            csv = pd.read_csv(tmp_path / nombre / "fase0_sanity.csv")
+            assert set(csv["combinacion"]) == {nombre}
+
+
 class TestCarpetaAcumulativa:
-    """Dos corridas sobre la misma carpeta, que es el escenario que motiva todo."""
+    """Dos ejecuciones sobre la misma carpeta: el escenario que motiva todo."""
 
     def _correr(self, bd: Path, out: Path, *args: str) -> None:
         barrido.main(["--db", str(bd), "--out", str(out),
@@ -216,7 +294,7 @@ class TestCarpetaAcumulativa:
                       "--entidades", ",".join(ENTIDADES),
                       "--fases", "0", "--bootstrap", "0", "--sin-figuras", *args])
 
-    def test_una_corrida_escribe_los_tres_entregables(
+    def test_una_ejecucion_escribe_los_tres_entregables(
         self, bd_sintetica: Path, tmp_path: Path, rejilla_pequena
     ) -> None:
         self._correr(bd_sintetica, tmp_path)
@@ -235,7 +313,7 @@ class TestCarpetaAcumulativa:
         self, bd_sintetica: Path, tmp_path: Path, rejilla_pequena
     ) -> None:
         """Cada `vNN` tiene que seguir designando la misma configuracion (la fecha
-        de la corrida si cambia: es lo unico que se reescribe).
+        de la ejecucion si cambia: es lo unico que se reescribe).
         """
         self._correr(bd_sintetica, tmp_path)
         antes = registro.hiperparametros(registro.cargar(tmp_path))
@@ -293,7 +371,7 @@ class TestCarpetaAcumulativa:
         assert "| v01 |" in texto and "| v02 |" in texto
         assert "2 combinaciones" in texto
 
-    def test_la_segunda_corrida_no_vuelve_a_ajustar_los_modelos(
+    def test_la_segunda_ejecucion_no_vuelve_a_ajustar_los_modelos(
         self, bd_sintetica: Path, tmp_path: Path, rejilla_pequena, capsys
     ) -> None:
         self._correr(bd_sintetica, tmp_path)
@@ -323,5 +401,6 @@ class TestCarpetaAcumulativa:
         """
         self._correr(bd_sintetica, tmp_path)
         proc = registro.procedencias(registro.cargar(tmp_path))
-        assert all({"corrida", "datos", "codigo"} <= set(p) for p in proc.values())
+        esperados = {registro.CAMPO_FECHA, "datos", "codigo"}
+        assert all(esperados <= set(p) for p in proc.values())
         assert registro.homogeneo(registro.cargar(tmp_path))

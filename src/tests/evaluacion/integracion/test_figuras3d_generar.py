@@ -100,7 +100,7 @@ class TestScoreCompuesto:
     def test_se_calcula_sobre_todas_las_metricas_y_no_sobre_el_filtro(
         self, barrido_2x2: Path
     ) -> None:
-        """Si dependiera de `--metricas`, seria un numero distinto en cada corrida
+        """Si dependiera de `--metricas`, seria un numero distinto en cada ejecucion
         y no serviria para ordenar nada.
         """
         completo = barrido_2x2 / "completo"

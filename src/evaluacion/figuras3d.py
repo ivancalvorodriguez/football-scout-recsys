@@ -11,7 +11,7 @@ Este script NO construye ni evalua nada: LEE la salida de
 `combinaciones.json`) y dibuja, por cada (metrica, modelo), una superficie con
 un hiperparametro en X, otro en Y y el valor de la metrica en Z. Como la carpeta
 del barrido es ACUMULATIVA, esos dos ficheros traen TODOS los puntos evaluados
-en ella —vengan de una corrida o de cinco—, asi que ampliar la rejilla es
+en ella —vengan de una ejecucion o de cinco—, asi que ampliar la rejilla es
 relanzar el barrido con mas valores y volver a dibujar. Las tablas del
 `resumen_barrido.md` dicen que combinacion gana; la superficie enseña la FORMA
 del optimo: si hay una meseta, una cresta estrecha o un maximo en el borde de la
@@ -63,10 +63,10 @@ Salida en `<barrido>/figuras3d/`:
   resultado) y `score.csv` (el score con las z que lo componen, para que sea
   auditable).
 
-Los CSV y el HTML recogen exactamente lo que se dibujo en esa corrida, asi que
+Los CSV y el HTML recogen exactamente lo que se dibujo en esa ejecucion, asi que
 `--metricas`/`--modelos` los deja acotados a ese filtro. El score, en cambio, se
 calcula siempre sobre TODAS las metricas del barrido: si dependiera del filtro,
-seria un numero distinto en cada corrida.
+seria un numero distinto en cada ejecucion.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ def leer_valores(barrido_dir: Path) -> pd.DataFrame:
     """`barrido_metricas.csv` en formato largo (una fila por combinacion-modelo-metrica).
 
     Ese CSV es ACUMULATIVO (ver `registro.py`): trae los puntos de todas las
-    corridas hechas sobre la carpeta, no solo los de la ultima. Es lo que permite
+    ejecuciones hechas sobre la carpeta, no solo los de la ultima. Es lo que permite
     que la superficie tenga la rejilla entera aunque se haya barrido en varias
     tandas.
     """
@@ -118,7 +118,7 @@ def _combinaciones_recomputadas(df: pd.DataFrame) -> dict[str, dict[str, object]
     Ultimo recurso: solo si la carpeta no tiene ni `combinaciones.json` ni
     `resumen_barrido.md` (barrido interrumpido antes de escribirlos). Vale lo que
     valga la suposicion de que `HIPERPARAMETROS` y los defaults de
-    `src/similitud/config.py` no han cambiado desde la corrida, y ademas nombra
+    `src/similitud/config.py` no han cambiado desde la ejecucion, y ademas nombra
     por POSICION, que es justo lo que el registro dejo de hacer; por eso se avisa.
     """
     forms = tuple(f for f in ecfg.FORMULACIONES if f in set(df["formulacion"]))
@@ -137,7 +137,7 @@ def combinaciones_del_barrido(
 
     Se lee de la carpeta (`combinaciones.json`, y si no del `resumen_barrido.md`)
     en vez de recalcularse desde `barrido.HIPERPARAMETROS`: esa lista se EDITA
-    entre corridas, asi que recalcularla etiquetaria las figuras con los ejes del
+    entre ejecuciones, asi que recalcularla etiquetaria las figuras con los ejes del
     barrido de hoy y no con los que produjeron cada punto. El registro publica los
     valores efectivos con los que se construyo cada combinacion, que es justo lo
     que necesita la superficie.
@@ -152,7 +152,7 @@ def combinaciones_del_barrido(
               "resumen_barrido.md: se recomponen los hiperparametros desde "
               "barrido.HIPERPARAMETROS y los defaults actuales de "
               "src/similitud/config.py. Si esos valores han cambiado desde la "
-              "corrida, las etiquetas de los ejes seran incorrectas.")
+              "ejecucion, las etiquetas de los ejes seran incorrectas.")
         combos = _combinaciones_recomputadas(df)
 
     presentes = [c for c in df["combinacion"].unique()]
@@ -516,7 +516,7 @@ def generar(
 
     # El score se calcula ANTES de aplicar los filtros: agrega TODAS las metricas
     # del barrido, no las que el usuario haya pedido dibujar. Filtrar antes daria
-    # un "score" distinto en cada corrida segun el flag, que es justo lo que no
+    # un "score" distinto en cada ejecucion segun el flag, que es justo lo que no
     # puede pasar con un numero que se usa para ordenar modelos.
     entidad_de: dict[str, str] = dict(zip(df["modelo"], df["entidad"]))
     if con_score:

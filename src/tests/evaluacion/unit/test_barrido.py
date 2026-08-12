@@ -127,7 +127,7 @@ class TestEjesYCombinaciones:
         self, rejilla_pequena
     ) -> None:
         """Un eje ausente no significa "sin EASE": significa lo que diga el
-        default del repo el dia de la corrida.
+        default del repo el dia de la ejecucion.
         """
         assert barrido._ejes_publicados() == ["F2_L1", "F5_EASE_LAMBDA"]
 
@@ -193,7 +193,7 @@ class TestCacheDeArtefactos:
             tmp_path, tmp_path / "v02" / "modelo", self.STEM, h) is None
 
     def test_copiar_lleva_los_tres_ficheros(self, tmp_path: Path, bd: Path) -> None:
-        """El .npz, el .json y la huella: sin la huella, la siguiente corrida
+        """El .npz, el .json y la huella: sin la huella, la siguiente ejecucion
         volveria a reconstruirlo.
         """
         h = huella.calcular("2", "equipo", "global", bd)
@@ -213,6 +213,87 @@ class TestCacheDeArtefactos:
 
     def test_una_ruta_de_fuera_se_imprime_absoluta(self, tmp_path: Path) -> None:
         assert Path(barrido._ruta_visible(tmp_path / "x.npz")).is_absolute()
+
+
+class TestPlan:
+    """El plan de la ejecucion: quien ajusta cada artefacto y quien lo copia.
+
+    Se prueba sin construir nada (los `Paso` se fabrican a mano): lo que decide el
+    reparto es la HUELLA, y con celdas de la misma huella basta para comprobar que
+    solo una queda como propietaria. El plan calculado contra disco de verdad se
+    prueba en `integracion/test_barrido_cache.py`.
+    """
+
+    def _paso(self, combinacion: str, celda: tuple, h: dict, via: str = "construye"):
+        return barrido.Paso(
+            combinacion=combinacion, valores={}, celda=barrido.Celda(*celda),
+            model_dir=Path(combinacion) / "modelo", huella=h, via=via)
+
+    def test_solo_una_combinacion_ajusta_cada_artefacto(self) -> None:
+        """Sin esto, N trabajadores arrancando a la vez sobre combinaciones
+        consecutivas ajustarian N veces el mismo modelo: ninguno veria la huella
+        del otro hasta terminar.
+        """
+        celda = ("2", "equipo", "global")
+        pasos = [self._paso("v01", celda, {"h": 1}),
+                 self._paso("v02", celda, {"h": 1}),
+                 self._paso("v03", celda, {"h": 1})]
+        barrido._repartir_construcciones(pasos)
+        assert [p.via for p in pasos] == ["construye", "copia", "copia"]
+        assert all(p.origen == Path("v01") / "modelo" for p in pasos[1:])
+
+    def test_dos_huellas_distintas_se_ajustan_las_dos(self) -> None:
+        celda = ("2", "equipo", "global")
+        pasos = [self._paso("v01", celda, {"h": 1}),
+                 self._paso("v02", celda, {"h": 2})]
+        barrido._repartir_construcciones(pasos)
+        assert [p.via for p in pasos] == ["construye", "construye"]
+
+    def test_no_toca_las_celdas_que_ya_salen_de_la_cache(self) -> None:
+        celda = ("2", "equipo", "global")
+        pasos = [self._paso("v01", celda, {"h": 1}, via="cache"),
+                 self._paso("v02", celda, {"h": 1})]
+        barrido._repartir_construcciones(pasos)
+        assert [p.via for p in pasos] == ["cache", "construye"]
+
+    def test_agrupa_para_evaluar_las_celdas_con_la_misma_huella(self) -> None:
+        """Mismo artefacto + fases deterministas = mismas metricas: se evalua una
+        vez y el resultado se reparte."""
+        celda = ("5", "jugador", "global")
+        pasos = [self._paso("v01", celda, {"h": 1}),
+                 self._paso("v02", celda, {"h": 1}),
+                 self._paso("v03", celda, {"h": 2})]
+        grupos = barrido._agrupar(pasos, reutilizar=True)
+        assert sorted(len(g) for g in grupos.values()) == [1, 2]
+
+    def test_sin_reutilizar_cada_celda_va_por_su_cuenta(self) -> None:
+        celda = ("5", "jugador", "global")
+        pasos = [self._paso("v01", celda, {"h": 1}),
+                 self._paso("v02", celda, {"h": 1})]
+        assert len(barrido._agrupar(pasos, reutilizar=False)) == 2
+
+    def test_una_celda_de_otra_formulacion_nunca_se_agrupa(self) -> None:
+        """La huella no lleva la formulacion dentro, pero el stem si: dos modelos
+        distintos con hiperparametros que casualmente coincidan no son el mismo.
+        """
+        pasos = [self._paso("v01", ("2", "equipo", "global"), {"h": 1}),
+                 self._paso("v01", ("5", "equipo", "global"), {"h": 1})]
+        assert len(barrido._agrupar(pasos, reutilizar=True)) == 2
+
+    def test_el_orden_del_informe_es_el_de_evaluar(self) -> None:
+        """Los CSV de una combinacion tienen que salir igual que si se hubiera
+        evaluado del tiron, no en el orden en que conviene ejecutarlas."""
+        orden = barrido._orden_informe(ecfg.FORMULACIONES, ecfg.ENTIDADES)
+        esperado = [(f, e, n) for f in ecfg.FORMULACIONES
+                    for e in ecfg.ENTIDADES for n in ecfg.NORMALIZACIONES]
+        assert [(c.formulacion, c.entidad, c.normalizacion) for c in orden] == esperado
+
+    def test_el_informe_solo_lleva_las_normalizaciones_pedidas(self) -> None:
+        """Con `--normalizaciones global` la otra no se construye: si siguiera en
+        el orden del informe, `evaluar_plan` la buscaria en un plan que no la tiene.
+        """
+        orden = barrido._orden_informe(("5",), ("equipo",), ("global",))
+        assert [c.normalizacion for c in orden] == ["global"]
 
 
 class TestTablaLarga:
@@ -366,7 +447,7 @@ class TestResumenBarrido:
         reg = registro.vacio()
         registro.nombrar(reg, [{"F2_L1": 0.25}, {"F2_L1": 0.5}])
         registro.anotar(reg, ["v01", "v02"],
-                        {"corrida": "2026-01-01 10:00", "datos": {"bytes": 1},
+                        {"ejecucion": "2026-01-01 10:00", "datos": {"bytes": 1},
                          "codigo": {"2": "x", "5": "y"}})
         return reg
 
@@ -463,6 +544,11 @@ class TestSubconjuntoDeLaRejilla:
     def test_una_lista_vacia_aborta(self) -> None:
         with pytest.raises(SystemExit, match="al menos una"):
             barrido._subconjunto(" , ", ecfg.ENTIDADES, "entidades")
+
+    def test_acota_tambien_las_normalizaciones(self) -> None:
+        """`--normalizaciones` acota igual que los otros dos ejes de la rejilla."""
+        assert barrido._subconjunto("global", ecfg.NORMALIZACIONES,
+                                    "normalizaciones") == ("global",)
 
 
 class TestFormatoDeValores:

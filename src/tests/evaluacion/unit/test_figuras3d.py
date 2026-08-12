@@ -37,7 +37,7 @@ class TestLeerValores:
 class TestCombinacionesDelBarrido:
     def test_se_leen_del_registro_de_la_carpeta(self, barrido_2x2: Path) -> None:
         """No se recalculan desde `barrido.HIPERPARAMETROS`: esa lista se EDITA
-        entre corridas y etiquetaria las figuras con los ejes de hoy.
+        entre ejecuciones y etiquetaria las figuras con los ejes de hoy.
         """
         df = figuras3d.leer_valores(barrido_2x2)
         combos = figuras3d.combinaciones_del_barrido(barrido_2x2, df)

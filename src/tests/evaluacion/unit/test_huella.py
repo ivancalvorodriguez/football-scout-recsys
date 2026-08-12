@@ -256,15 +256,15 @@ class TestProcedencia:
     def test_declara_los_datos_y_el_codigo_de_las_dos_formulaciones(
         self, bd: Path
     ) -> None:
-        """Se hashean SIEMPRE las dos, tambien la que la corrida no construya: si
-        dependiera de `--formulaciones`, dos corridas de la misma carpeta
+        """Se hashean SIEMPRE las dos, tambien la que la ejecucion no construya: si
+        dependiera de `--formulaciones`, dos ejecuciones de la misma carpeta
         parecerian discrepar solo por haberse acotado distinto.
         """
         p = huella.procedencia(bd)
         assert set(p) == {"datos", "codigo"}
         assert set(p["codigo"]) == {"2", "5"}
 
-    def test_dos_corridas_seguidas_declaran_la_misma_procedencia(self, bd: Path) -> None:
+    def test_dos_ejecuciones_seguidas_declaran_lo_mismo(self, bd: Path) -> None:
         assert huella.procedencia(bd) == huella.procedencia(bd)
 
 

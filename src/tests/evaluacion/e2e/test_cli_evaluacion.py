@@ -155,7 +155,8 @@ class TestBarrido:
     def test_construye_y_evalua_sin_build_previo(self, barrido: dict) -> None:
         """Es la diferencia con `evaluar`: se puede lanzar de cero."""
         assert barrido["res"].returncode == 0, barrido["res"].stderr
-        assert "[construir] rejilla de modelos" in barrido["res"].stdout
+        assert "artefactos que ajustar" in barrido["res"].stdout
+        assert "[evaluar]" in barrido["res"].stdout
 
     def test_escribe_los_tres_entregables_de_la_carpeta(self, barrido: dict) -> None:
         for nombre in ("resumen_barrido.md", "barrido_metricas.csv",
@@ -217,6 +218,34 @@ class TestBarrido:
         assert res.returncode != 0
         assert "entidades desconocidas" in res.stderr
 
+    def test_una_normalizacion_desconocida_aborta(self, bd_sintetica: Path,
+                                                  tmp_path: Path) -> None:
+        res = ejecutar_barrido("--db", str(bd_sintetica), "--out", str(tmp_path),
+                               "--normalizaciones", "por_equipo")
+        assert res.returncode != 0
+        assert "normalizaciones desconocidas" in res.stderr
+
+    def test_acotar_la_normalizacion_deja_fuera_la_otra(
+        self, bd_sintetica: Path, tmp_path: Path
+    ) -> None:
+        """Por defecto se construyen las dos (compararlas es el motivo de que sean
+        un eje de la rejilla); con la flag, la que no se pide ni se construye ni se
+        evalua.
+        """
+        res = ejecutar_barrido(
+            "--db", str(bd_sintetica), "--out", str(tmp_path),
+            "--formulaciones", "5", "--entidades", "equipo",
+            "--normalizaciones", "global",
+            "--fases", "0", "--bootstrap", "0", "--sin-figuras",
+            ejes=[("F5_EASE_LAMBDA", [10.0])],
+        )
+        assert res.returncode == 0, res.stderr
+        model_dir = tmp_path / "v01" / "modelo"
+        assert (model_dir / "formulacion5_equipo_global.npz").exists()
+        assert not list(model_dir.glob("*por_liga*"))
+        metricas = (tmp_path / "barrido_metricas.csv").read_text(encoding="utf-8")
+        assert "global" in metricas and "por_liga" not in metricas
+
     def test_un_hiperparametro_inexistente_aborta_antes_de_construir(
         self, bd_sintetica: Path, tmp_path: Path
     ) -> None:
@@ -231,9 +260,36 @@ class TestBarrido:
     def test_la_ayuda_documenta_las_opciones(self) -> None:
         res = ejecutar_modulo("src.evaluacion.barrido", "--help")
         assert res.returncode == 0
-        for opcion in ("--formulaciones", "--entidades", "--fases", "--rehacer",
-                       "--adoptar-existentes"):
+        for opcion in ("--formulaciones", "--entidades", "--normalizaciones",
+                       "--fases", "--rehacer", "--adoptar-existentes",
+                       "--trabajos", "--sin-reutilizar-metricas"):
             assert opcion in res.stdout
+
+    def test_un_valor_invalido_de_trabajos_aborta_antes_de_construir(
+        self, bd_sintetica: Path, tmp_path: Path
+    ) -> None:
+        res = ejecutar_barrido("--db", str(bd_sintetica), "--out", str(tmp_path),
+                               "--trabajos", "muchos")
+        assert res.returncode != 0
+        assert "se esperaba un entero" in res.stderr
+
+    def test_en_paralelo_da_los_mismos_entregables(
+        self, bd_sintetica: Path, tmp_path: Path
+    ) -> None:
+        """Con varios trabajadores hay procesos hijos de verdad: es lo unico que
+        comprueba que las tareas se serializan y que `spawn` encuentra sus modulos.
+        """
+        res = ejecutar_barrido(
+            "--db", str(bd_sintetica), "--out", str(tmp_path),
+            "--formulaciones", "5", "--entidades", "equipo",
+            "--fases", "0", "--bootstrap", "0", "--sin-figuras",
+            "--trabajos", "2",
+        )
+        assert res.returncode == 0, res.stderr
+        assert "con 2 trabajadores" in res.stdout
+        assert (tmp_path / "barrido_metricas.csv").exists()
+        assert sorted(p.name for p in tmp_path.glob("v*")) == [
+            "v01", "v02", "v03", "v04"]
 
 
 class TestFiguras3d:

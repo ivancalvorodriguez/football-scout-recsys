@@ -130,7 +130,7 @@ class TestFidelidadDeLaReconstruccion:
 
 
 class TestFasesSobreDatosReales:
-    """Las fases, corridas sobre la S que produce el pipeline de verdad."""
+    """Las fases, ejecutadas sobre la S que produce el pipeline de verdad."""
 
     @staticmethod
     @pytest.fixture(scope="class")
