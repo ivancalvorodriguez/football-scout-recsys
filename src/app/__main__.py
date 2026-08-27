@@ -61,6 +61,11 @@ def _parser() -> argparse.ArgumentParser:
                         "inverso que termina TLS.")
     p.add_argument("--hilos", type=int, default=HILOS_DEFECTO,
                    help=f"Hilos de waitress con --produccion (por defecto {HILOS_DEFECTO}).")
+    p.add_argument("--cola", default=None,
+                   help="URL de redis donde encolar las tareas largas de /datos, "
+                        "que pasa a ejecutar el worker (python -m src.app.worker). "
+                        f"Por defecto, ${config_app.ENV_COLA}; sin ninguna de las "
+                        "dos, las ejecuta este mismo proceso.")
     p.add_argument("--log", default=None,
                    help="Nivel de log: DEBUG, INFO, WARNING, ERROR.")
     return p
@@ -81,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         app = crear_app(
             args.modelo, db_path=args.bd, ruta_usuarios=args.usuarios,
-            produccion=args.produccion, nivel_log=args.log,
+            url_cola=args.cola, produccion=args.produccion, nivel_log=args.log,
         )
     except RuntimeError as exc:      # falta la clave de firma en producción
         print(f"Error: {exc}", file=sys.stderr)
@@ -93,6 +98,12 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"Sin base de datos en {args.bd.resolve()} "
               f"(se omiten equipo, posiciones y nombres de liga).")
+    cola = app.config["APP_SIMILITUD"].url_cola
+    if cola:
+        # Se dice al arrancar porque cambia quién ejecuta: si el worker no está
+        # en pie, «Añadir partidos» y «Entrenar» aceptarán y no pasará nada
+        # visible. Mejor saber desde el principio que la app ya no ejecuta.
+        print(f"Cola de tareas: {cola} (las ejecuta el worker, no este proceso)")
     if not app.extensions["usuarios"].hay_cuentas:
         print("AVISO: no hay ninguna cuenta dada de alta, así que no se puede "
               "entrar. Crea una con:\n"

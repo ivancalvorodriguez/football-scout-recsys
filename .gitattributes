@@ -1,0 +1,19 @@
+# Finales de línea.
+#
+# Este repo se desarrolla en Windows con `core.autocrlf=true`, que al hacer
+# checkout convierte LF -> CRLF. Para casi todo da igual, pero lo que acaba
+# DENTRO de un contenedor Linux no puede llevar CRLF:
+#
+#   - un script con shebang y CRLF falla con `bad interpreter: no such file or
+#     directory`, porque el kernel se cree que el intérprete es `/bin/sh\r`;
+#   - el entrypoint se lee tal cual dentro de la imagen.
+#
+# Con esto, el árbol de trabajo tiene LF pase lo que pase en la configuración de
+# quien clone, y `docker build` copia exactamente lo que se espera.
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+# El Caddyfile del proxy: no tiene extension, asi que no lo pilla ninguna regla
+# de arriba, y tambien se lee dentro de un contenedor Linux.
+docker/Caddyfile text eol=lf
+*.yml           text eol=lf
+.dockerignore   text eol=lf

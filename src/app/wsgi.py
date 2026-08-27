@@ -14,16 +14,21 @@ sabe fijar:
 - `SCOUTING_USUARIOS` — registro de cuentas (por defecto, `outputs/usuarios.json`).
 - `SCOUTING_SECRET_KEY` — clave de firma de la sesión. **Obligatoria aquí**.
 - `SCOUTING_LOG`      — nivel de log (INFO por defecto).
+- `SCOUTING_COLA`     — URL de redis donde encolar las tareas largas de `/datos`.
+  Sin ella, las ejecuta este mismo proceso (ver `src/app/cola.py`).
 
 Se crea en modo producción, así que sin `SCOUTING_SECRET_KEY` el import falla con
 un mensaje que explica por qué. Fallar al arrancar es lo correcto: la alternativa
 es un servidor en pie con sesiones que se invalidan solas.
 
-**gunicorn con más de un worker NO está soportado.** El estado de las tareas y
-todos los catálogos viven en memoria del proceso; con varios, «una tarea a la
-vez» deja de cumplirse y el sondeo de `/datos/tarea` devuelve null cuando cae en
-otro worker. Lo soportado es UN proceso con varios HILOS (waitress `--threads`,
-o `gunicorn -w 1 --threads N`). El detalle está en `docs/app_web.md`.
+**gunicorn con más de un worker NO está soportado.** Los catálogos viven en
+memoria del proceso, y sin `SCOUTING_COLA` el estado de las tareas también: con
+varios procesos, «una tarea a la vez» deja de cumplirse y el sondeo de
+`/datos/tarea` devuelve null cuando cae en otro worker. Lo soportado es UN
+proceso con varios HILOS (waitress `--threads`, o `gunicorn -w 1 --threads N`).
+Con `SCOUTING_COLA` el estado de las tareas SÍ es compartido, pero los catálogos
+siguen sin serlo, así que la regla no cambia. El detalle está en
+`docs/app_web.md`.
 """
 
 from __future__ import annotations

@@ -115,6 +115,11 @@ ENV_CLAVE = "SCOUTING_SECRET_KEY"
 ENV_MODELO = "SCOUTING_MODELO"
 ENV_BD = "SCOUTING_BD"
 ENV_USUARIOS = "SCOUTING_USUARIOS"
+# URL de la cola de tareas (redis). VACÍA es un valor con significado: sin ella,
+# la app ejecuta las tareas largas en su propio proceso, que es lo que se quiere
+# en desarrollo y en cualquier despliegue de un solo contenedor. Con ella, las
+# encola y las ejecuta el worker (ver `src/app/cola.py`).
+ENV_COLA = "SCOUTING_COLA"
 
 # Qué exige sesión, por prefijo de ruta. La lista es de lo PRIVADO y no de lo
 # público porque así se lee la decisión de producto: **el recomendador es
@@ -201,6 +206,8 @@ class Config:
     produccion: bool = False
     duracion_max_tarea: float = DURACION_MAX_TAREA
     ruta_marca_tarea: Path = RUTA_MARCA_TAREA
+    # URL de la cola. Vacía = las tareas se ejecutan en este mismo proceso.
+    url_cola: str = ""
     max_modelos: int = MAX_MODELOS_POR_USUARIO
     max_datasets: int = MAX_DATASETS_POR_USUARIO
     top_k_defecto: int = TOP_K_DEFECTO
@@ -208,3 +215,15 @@ class Config:
     n_coincidencias: int = N_COINCIDENCIAS
     n_rasgos_ficha: int = N_RASGOS_FICHA
     max_sugerencias: int = MAX_SUGERENCIAS
+
+
+def url_cola() -> str:
+    """La URL de la cola que diga el entorno, o cadena vacía.
+
+    Cadena vacía y no `None` para que el sitio que la consume pueda escribir
+    `if url:` sin distinguir entre «no configurada» y «configurada a nada»: en
+    los dos casos la respuesta es la misma, ejecutar en proceso.
+    """
+    import os                                   # noqa: PLC0415 - uso local
+
+    return os.environ.get(ENV_COLA, "").strip()

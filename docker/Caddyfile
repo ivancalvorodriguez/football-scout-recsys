@@ -1,0 +1,56 @@
+# Proxy inverso del compose (servicio `proxy`, perfil `https`).
+#
+# Existe por una razón concreta: en modo `produccion` la app marca la cookie de
+# sesión como `Secure` (decisión de docs/app_web.md), así que por HTTP plano el
+# recomendador se consulta igual pero NADIE puede iniciar sesión ni entrar en
+# `/datos`. Este proxy termina TLS y pasa a `app:8000`, que es lo que hace ese
+# modo utilizable.
+#
+# Caddy y no nginx porque saca el certificado solo: con un dominio real usa
+# Let's Encrypt, y con `localhost` genera uno propio y lo instala. Eso evita
+# tener que meter en el repo ni un certificado de ejemplo ni las instrucciones
+# para generarlo, que es la clase de decisión que no es de este repositorio.
+#
+# El dominio se elige con SCOUTING_DOMINIO en `.env` (por defecto `localhost`).
+# La primera vez con `localhost`, el navegador avisará del certificado: es lo
+# esperable en una máquina de desarrollo.
+
+# No hay bloque global con `email`: Caddy no lo necesita para sacar certificados
+# (Let's Encrypt lo acepta vacio) y, con la variable definida-pero-vacia que pasa
+# el compose, `email {$VAR:defecto}` se queda SIN argumento y Caddy no arranca —
+# el defecto de esa sintaxis sólo se aplica si la variable no existe. Para un
+# despliegue real con dominio propio, añadir aqui arriba:
+#
+#     {
+#     	email tu@dominio.com
+#     }
+
+{$SCOUTING_DOMINIO:localhost} {
+	encode zstd gzip
+
+	# HSTS. Sólo tiene sentido detrás de TLS, que es justo lo que hay aquí; en
+	# la app no se pone porque ahí no se sabe si delante hay HTTPS.
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+	reverse_proxy app:8000 {
+		# La app decide `SESSION_COOKIE_SECURE` y las rutas absolutas por su
+		# modo, no por la petición, pero estas cabeceras son las que permiten a
+		# Flask componer bien un `url_for(..., _external=True)` detrás del proxy.
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+
+		# Un reentrenamiento no pasa por aquí (lo lanza `/datos` y se sondea
+		# aparte), pero la ingesta de un paquete grande sí puede tardar en
+		# devolver el POST. El defecto de Caddy no tiene tope de lectura; se deja
+		# explícito para que se vea que es una decisión.
+		transport http {
+			read_timeout 300s
+		}
+	}
+
+	# El cuerpo de un POST de `/datos` son campos de formulario: nada grande. Un
+	# tope explícito evita que una petición absurda ocupe memoria del proceso.
+	request_body {
+		max_size 10MB
+	}
+}

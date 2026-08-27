@@ -1,0 +1,192 @@
+# Docker Compose del TFG: la app web del recomendador por similitud.
+#
+#     docker compose up -d --build                    ->  http://localhost:8000
+#     docker compose --profile https up -d --build    ->  https://localhost
+#
+# CUATRO servicios, y sólo dos están siempre en pie:
+#
+#   app     sirve las páginas y la API. No ejecuta nada largo: encola.
+#   worker  ejecuta lo que la app encola (`src.incremental.ingesta` y
+#           `... .reentrenar`). Misma imagen, otro punto de entrada.
+#   redis   la cola y el estado de las tareas. Nada más: la base de datos y los
+#           artefactos siguen viajando por el volumen `outputs/`.
+#   proxy   termina TLS y pasa a `app:8000`. Perfil `https`, porque sólo hace
+#           falta con SCOUTING_MODO=produccion (ver más abajo).
+#
+# Por qué app y worker están separados: un reentrenamiento puede durar media hora
+# y antes competía por la memoria y los ciclos del proceso que sirve las páginas.
+# Ahora reiniciar la app (un despliegue, un fallo) tampoco mata la tarea en
+# curso. El precio es redis y una dependencia nueva (`redis` en
+# requirements-app.txt); el diseño está en `src/app/cola.py`.
+#
+# Lo que NO se ha containerizado sigue igual: los módulos del pipeline
+# (extracción, similitud, evaluación) son comandos de un solo uso, se ejecutan en
+# el anfitrión con el venv de siempre y sus tiempos y su consumo de memoria piden
+# la máquina entera. La imagen lleva `src/` entero de todos modos porque el
+# worker lanza los CLI de `src.incremental` como subproceso.
+
+name: tfg-scouting
+
+# --- Base común de app y worker ----------------------------------------------
+# Las dos corren la MISMA imagen sobre los MISMOS volúmenes; lo único que cambia
+# es el punto de entrada. Compartir el bloque es lo que garantiza que no se
+# separen: si `outputs/` estuviera montado en un sitio y no en el otro, el worker
+# entrenaría un modelo que la app no vería.
+x-app-comun: &app-comun
+  image: tfg-scouting-app:local
+  working_dir: /app
+
+  # `outputs/` (58 GB aquí) y `open-data/` (20 GB) NO están en la imagen: entran
+  # como bind mount. Así el modelo entrenado desde `/datos` sobrevive a un
+  # `docker compose down`, el `build` no tarda minutos en enviarle el contexto al
+  # demonio, y la salida se sigue mirando desde el anfitrión con las herramientas
+  # de siempre.
+  #
+  # `open-data/` va en SÓLO LECTURA: es un dataset externo vendored con su propio
+  # `.git` y la regla del proyecto es no escribir nunca dentro. Al contenedor
+  # deja de hacerle falta acordarse.
+  volumes:
+    - ./outputs:/app/outputs
+    - ./open-data:/app/open-data:ro
+
+  depends_on:
+    redis:
+      condition: service_healthy
+
+  restart: unless-stopped
+
+  # `init: true` mete un PID 1 de verdad (tini). En el worker es lo que impide
+  # que cada tarea cancelada o vencida deje un zombi: lanza los CLI de
+  # `src.incremental` como subprocesos y alguien tiene que adoptarlos y
+  # recogerlos. En la app queda por simetría y porque sin cola (`SCOUTING_COLA`
+  # vacía) vuelve a ser ella quien los lanza.
+  init: true
+
+services:
+
+  # --- La app web -------------------------------------------------------------
+  app:
+    <<: *app-comun
+    build:
+      context: .
+      args:
+        PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+
+    ports:
+      - "${SCOUTING_PUERTO:-8000}:8000"
+
+    environment:
+      # local | produccion. En `produccion` la app sirve con waitress y marca la
+      # cookie de sesión como `Secure` (decisión de docs/app_web.md), así que por
+      # HTTP plano NADIE puede iniciar sesión: ese modo da por hecho un proxy
+      # inverso con TLS delante, que es el servicio `proxy` de este mismo fichero
+      # (perfil `https`). El defecto es el que se puede usar tal cual.
+      SCOUTING_MODO: ${SCOUTING_MODO:-local}
+      SCOUTING_SECRET_KEY: ${SCOUTING_SECRET_KEY:-}
+      SCOUTING_HILOS: ${SCOUTING_HILOS:-8}
+      SCOUTING_LOG: ${SCOUTING_LOG:-INFO}
+      SCOUTING_MODELO: ${SCOUTING_MODELO:-outputs/modelo}
+      SCOUTING_BD: ${SCOUTING_BD:-outputs/db/scouting.db}
+      # Con esto la app ENCOLA en vez de ejecutar. Vaciarla es volver al modo de
+      # un solo contenedor: la app ejecutaría las tareas ella misma y el worker
+      # se quedaría sin trabajo (por eso `worker` se niega a arrancar sin ella).
+      SCOUTING_COLA: ${SCOUTING_COLA:-redis://redis:6379/0}
+
+    # Un reentrenamiento en curso ya no vive aquí, así que la app puede cerrar
+    # rápido. Se deja margen igualmente para que termine de servir lo que tenga
+    # a medias.
+    stop_grace_period: 10s
+
+  # --- El que ejecuta ---------------------------------------------------------
+  worker:
+    <<: *app-comun
+    # No construye: reutiliza la imagen que construye `app`. `depends_on` con
+    # `service_started` sobre app sería mentira (no la necesita para nada), pero
+    # sin esto un `docker compose up worker` a secas no encontraría la imagen.
+    build:
+      context: .
+      args:
+        PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    entrypoint: ["/usr/local/bin/entrada-worker.sh"]
+
+    environment:
+      SCOUTING_COLA: ${SCOUTING_COLA:-redis://redis:6379/0}
+      SCOUTING_LOG: ${SCOUTING_LOG:-INFO}
+
+    # NO se escala. `--scale worker=N` rompería el «una tarea a la vez»: las dos
+    # tareas escriben en sitios compartidos (la BD y el directorio de modelos) y
+    # lo que hoy garantiza que no se pisen es que este bucle es secuencial y hay
+    # uno solo. El cerrojo de redis da el 409 de la interfaz, no la exclusión.
+    scale: 1
+
+    # Comprueba que el worker alcanza la cola. Ojo con lo que NO dice: que el
+    # bucle esté vivo. Un worker colgado con redis sano saldría `healthy`. Para
+    # eso está el plazo máximo de cada tarea, que sí lo detecta.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import os,redis; redis.Redis.from_url(os.environ['SCOUTING_COLA']).ping()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+    # Al recibir SIGTERM el worker mata la tarea en curso y la marca fallida, en
+    # vez de intentar terminarla: media hora de reentrenamiento no cabe en ningún
+    # `stop_grace_period` razonable, y lo que queda a medias es descartable (la
+    # ingesta escribe sobre una COPIA de la BD, el reentrenamiento sobre una
+    # carpeta de modelo recién creada). Estos 30 s son para que dé tiempo a
+    # soltar el cerrojo y dejar dicho lo que pasó.
+    stop_grace_period: 30s
+
+  # --- La cola ----------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    # `appendonly`: sin persistencia, un reinicio de redis con una tarea en curso
+    # borraría el cerrojo y la interfaz declararía el servidor libre mientras el
+    # worker sigue escribiendo. El worker lo repone en su siguiente latido
+    # (`Cola.refrescar_cerrojo`), pero es una ventana que no hace falta abrir.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-datos:/data
+    # Sin `ports`: la cola es asunto interno del compose. Publicarla sería
+    # exponer en el anfitrión un servicio sin contraseña.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # --- TLS delante ------------------------------------------------------------
+  # Perfil `https`: no arranca con un `docker compose up` normal. Sólo hace falta
+  # con SCOUTING_MODO=produccion, que es cuando la cookie de sesión va marcada
+  # `Secure` y sin HTTPS nadie puede iniciar sesión.
+  #
+  #     docker compose --profile https up -d
+  proxy:
+    image: caddy:2-alpine
+    profiles: ["https"]
+    depends_on:
+      - app
+    ports:
+      - "${SCOUTING_PUERTO_HTTP:-80}:80"
+      - "${SCOUTING_PUERTO_HTTPS:-443}:443"
+    environment:
+      SCOUTING_DOMINIO: ${SCOUTING_DOMINIO:-localhost}
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Los certificados que saca Caddy. Sin volumen se vuelven a pedir en cada
+      # `up`, y Let's Encrypt tiene cuotas.
+      - caddy-datos:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+volumes:
+  redis-datos:
+  caddy-datos:
+  caddy-config:

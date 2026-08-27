@@ -1,0 +1,30 @@
+# Contexto de build. Lista BLANCA a proposito.
+#
+# La raiz del repo pesa ~78 GB: `outputs/` son 58 (los barridos de evaluacion) y
+# `open-data/` otros 20 (el dataset de StatsBomb, vendored con su propio .git).
+# Nada de eso va DENTRO de la imagen: los dos entran como volumen en tiempo de
+# ejecucion (ver docker-compose.yml). Con una lista negra, cualquier carpeta
+# nueva en la raiz se colaria en el contexto y el `docker build` tardaria minutos
+# en enviarselo al demonio antes de ejecutar la primera instruccion; con lista
+# blanca, lo que entra esta escrito aqui y se ve de un vistazo.
+*
+
+# Lo que la imagen de la app necesita de verdad.
+#
+# `src` entero, no solo `src/app`: la seccion `/datos` lanza los CLI de
+# `src.incremental` como subproceso dentro de este mismo interprete, y esos
+# importan `src.extraccion` y `src.similitud`.
+!src
+!requirements.txt
+!requirements-app.txt
+!docker
+
+# La suite de pruebas son 11 de los 15 MB de `src/` y la app no la ejecuta: las
+# pruebas se corren en el anfitrion con `python -m pytest`, como siempre.
+src/tests
+
+# Y de lo que entra, fuera lo regenerable.
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mutmut-cache

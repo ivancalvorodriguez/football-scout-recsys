@@ -23,3 +23,9 @@ waitress==3.0.2
 # Autenticación, CSRF y hashing NO añaden dependencias: PBKDF2 sale de `hashlib`,
 # la comparación en tiempo constante de `hmac` y los tokens de `secrets`, todo de
 # la biblioteca estándar.
+# Cliente de la cola de tareas (`src/app/cola.py`, `src/app/worker.py`). Es la
+# ÚNICA dependencia nueva del reparto en cuatro contenedores, y sólo hace falta
+# cuando `SCOUTING_COLA` está puesta: sin ella la app ejecuta las tareas en su
+# propio proceso, `src.app.cola` no se importa y esto sobra. Se fija aquí de
+# todos modos para que el mismo `pip install -r` valga en los dos modos.
+redis==8.1.0

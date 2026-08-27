@@ -75,6 +75,11 @@ MODULOS = {
 # come la memoria del servidor guardando su log entero.
 MAX_LINEAS = 400
 
+# Cada cuanto late el worker y mira si le han pedido cancelar. Un segundo es
+# imperceptible para quien pulsa "Cancelar" y son 3.600 consultas a redis por
+# hora de entrenamiento: nada al lado de lo que cuesta el ajuste.
+INTERVALO_VIGILANCIA = 1.0
+
 # `    ajuste:  54%  (27313/50579)` del reentrenamiento.
 _PROGRESO_PCT = re.compile(r"^\s*(\w+):\s+(\d{1,3})%\s+\((\d+)/(\d+)\)")
 # `  [12/306] 3890561 Hoffenheim vs Schalke 04 — 28 jugadores (nuevo)` de la ingesta.
@@ -126,6 +131,9 @@ class Tarea:
     # Proceso vivo, para poder matarlo. No se serializa (no es del dominio de la
     # página, y un `Popen` no es JSON).
     proceso: subprocess.Popen | None = field(default=None, repr=False)
+    # Mensaje de error ya resuelto. Lo usa la cola: el worker tiene las lineas
+    # del hijo y la app no, asi que entre los dos viaja esta frase y no el log.
+    error_fijo: str = ""
 
     @property
     def segundos(self) -> float:
@@ -143,6 +151,8 @@ class Tarea:
         """
         if self.estado != "fallida":
             return ""
+        if self.error_fijo:
+            return self.error_fijo
         for linea in reversed(self.lineas):
             if linea.strip():
                 return linea.strip()
@@ -170,6 +180,235 @@ class Tarea:
             "error": self.error,
             "segundos": round(self.segundos, 1),
         }
+
+    def a_dict(self) -> dict:
+        """Todo lo necesario para reconstruirla en OTRO proceso.
+
+        `como_dict` es lo que ve el navegador, y por eso omite dueño, comando y
+        marcas de tiempo absolutas. Esto es lo que viaja por la cola entre `app`
+        y `worker`, donde esas tres cosas sí hacen falta. Las `lineas` no viajan:
+        de ellas sólo se necesitaba el mensaje de error, y ese ya va resuelto en
+        `error_fijo`.
+        """
+        return {
+            "id": self.id,
+            "tipo": self.tipo,
+            "titulo": self.titulo,
+            "usuario": self.usuario,
+            "estado": self.estado,
+            "codigo": self.codigo,
+            "progreso": self.progreso,
+            "paso": self.paso,
+            "inicio": self.inicio,
+            "fin": self.fin,
+            "motivo": self.motivo,
+            "error_fijo": self.error,
+        }
+
+    @classmethod
+    def desde_dict(cls, datos: dict) -> "Tarea":
+        """La inversa de `a_dict`, tolerante con lo que falte.
+
+        Tolerante a propósito: al otro lado hay una cadena JSON en redis que pudo
+        escribir una versión anterior del código. Una tarea con un campo de menos
+        se enseña algo peor; una excepción aquí tumba el sondeo de `/datos`.
+        """
+        return cls(
+            id=str(datos.get("id", "")),
+            tipo=str(datos.get("tipo", "")),
+            titulo=str(datos.get("titulo", "")),
+            comando=list(datos.get("comando") or []),
+            usuario=datos.get("usuario"),
+            estado=str(datos.get("estado") or "en_curso"),
+            codigo=datos.get("codigo"),
+            progreso=datos.get("progreso"),
+            paso=str(datos.get("paso") or ""),
+            inicio=float(datos.get("inicio") or time.time()),
+            fin=datos.get("fin"),
+            motivo=str(datos.get("motivo") or ""),
+            error_fijo=str(datos.get("error_fijo") or ""),
+        )
+
+
+def matar_proceso(proceso: subprocess.Popen | None) -> None:
+    """`kill` tolerante: que el hijo ya haya muerto no es un error."""
+    if proceso is None:
+        return
+    try:
+        proceso.kill()
+    except (OSError, ValueError):
+        pass
+
+
+class Ejecutor:
+    """Corre el comando de una tarea y va escribiendo su avance en ella.
+
+    Existe porque hay DOS sitios que ejecutan una tarea y tienen que hacerlo
+    igual: `GestorTareas`, cuando la app es un único proceso (desarrollo, o el
+    contenedor `app` sin cola), y `src.app.worker`, cuando la ejecución vive en
+    otro contenedor. Lanzar el hijo, leer su progreso, vencer el plazo y matarlo
+    son las mismas cuatro cosas en los dos; tenerlas por duplicado era garantizar
+    que acabaran separándose.
+
+    Lo único que cambia entre un sitio y otro es DÓNDE se apunta lo que va
+    pasando, y para eso están los ganchos, todos opcionales:
+
+    - `al_arrancar(tarea, pid)` — el hijo ya existe. El gestor local escribe con
+      esto la marca en disco; el worker publica además el pid.
+    - `al_cambiar(tarea)` — el progreso o el paso se han movido. El worker lo usa
+      para publicar; el gestor local no lo necesita, porque la `Tarea` que muta
+      **es** la misma que lee la página.
+    - `cancelacion_pedida()` — ¿alguien ha pedido pararla? Se consulta desde un
+      hilo aparte y no desde el bucle de lectura, porque ese bucle está
+      BLOQUEADO esperando la siguiente línea del hijo: si el hijo se cuelga sin
+      escribir, nunca volvería a preguntarlo. Es la misma razón por la que el
+      plazo máximo es un temporizador y no una comprobación del bucle.
+    - `al_latir()` — se llama en cada vuelta de ese mismo hilo. El worker refresca
+      ahí el TTL del cerrojo de la cola: si el worker muere, el cerrojo caduca
+      solo y el servidor no se queda ocupado para siempre.
+    """
+
+    def __init__(self, tarea: Tarea, cwd: Path, duracion_max: float | None = None,
+                 lock: threading.Lock | None = None,
+                 al_arrancar=None, al_cambiar=None,
+                 cancelacion_pedida=None, al_latir=None,
+                 intervalo_vigilancia: float = INTERVALO_VIGILANCIA) -> None:
+        self.tarea = tarea
+        self.cwd = Path(cwd)
+        self.duracion_max = duracion_max
+        self._lock = lock if lock is not None else threading.Lock()
+        self._al_arrancar = al_arrancar
+        self._al_cambiar = al_cambiar
+        self._cancelacion_pedida = cancelacion_pedida
+        self._al_latir = al_latir
+        self._intervalo = intervalo_vigilancia
+        self._parar = threading.Event()
+
+    def correr(self) -> tuple[int, str]:
+        """Ejecuta y bloquea hasta que el hijo termina.
+
+        Devuelve `(código, nota)` en vez de cerrar la tarea: cerrar significa
+        cosas distintas en cada lado (el gestor local suelta `_actual`, el worker
+        suelta el cerrojo de la cola), así que esa parte se queda en quien llama.
+        """
+        tarea = self.tarea
+        # PYTHONUNBUFFERED para ver el progreso en vivo (si no, el hijo bufferiza
+        # al no escribir a una consola) y PYTHONIOENCODING porque los nombres de
+        # jugador llevan caracteres fuera de latin-1.
+        entorno = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+        try:
+            proceso = subprocess.Popen(
+                tarea.comando,
+                cwd=str(self.cwd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=entorno,
+            )
+        except OSError as exc:
+            return -1, f"No se pudo lanzar: {exc}"
+
+        with self._lock:
+            tarea.proceso = proceso
+        if self._al_arrancar is not None:
+            self._al_arrancar(tarea, proceso.pid)
+
+        # Vigilante del plazo. Es un temporizador y no una comprobación dentro
+        # del bucle porque el bucle está BLOQUEADO leyendo la salida del hijo: si
+        # el hijo se cuelga sin escribir nada, ese bucle no vuelve a ejecutarse
+        # nunca y cualquier comprobación suya llegaría tarde para siempre.
+        vigilante = None
+        if self.duracion_max:
+            vigilante = threading.Timer(
+                self.duracion_max, self._vencer, args=(proceso,))
+            vigilante.daemon = True
+            vigilante.start()
+        if self._cancelacion_pedida is not None or self._al_latir is not None:
+            centinela = threading.Thread(
+                target=self._vigilar, args=(proceso,), daemon=True)
+            centinela.start()
+
+        try:
+            # En modo texto Python traduce el retorno de carro como fin de linea,
+            # asi que la barra de progreso del hijo (que reescribe la misma linea)
+            # llega aqui como una linea por actualizacion, sin tratamiento
+            # especial.
+            assert proceso.stdout is not None
+            for linea in proceso.stdout:
+                self._registrar(linea.rstrip("\n"))
+            codigo = proceso.wait()
+        finally:
+            if vigilante is not None:
+                vigilante.cancel()
+            self._parar.set()
+
+        # El texto se compone sólo si hace falta: `duracion_max` puede ser None
+        # (sin plazo) y formatearlo entonces reventaría el hilo justo al cerrar.
+        nota = ""
+        if tarea.motivo == "timeout":
+            nota = (f"La tarea excedió el máximo de {self.duracion_max:.0f} s "
+                    f"y se ha detenido.")
+        elif tarea.motivo == "cancelada":
+            nota = "Cancelada desde la interfaz."
+        return codigo, nota
+
+    def _vencer(self, proceso: subprocess.Popen) -> None:
+        """Se cumplió el plazo: se mata al hijo y se anota el motivo."""
+        with self._lock:
+            if self.tarea.estado != "en_curso" or self.tarea.motivo:
+                return          # ya terminó, o ya la estaban cancelando
+            self.tarea.motivo = "timeout"
+        matar_proceso(proceso)
+
+    def _vigilar(self, proceso: subprocess.Popen) -> None:
+        """Late y mira si han pedido cancelar, hasta que el hijo termine."""
+        while not self._parar.wait(self._intervalo):
+            # Los dos ganchos hablan con un servicio de red (redis). Que una
+            # consulta falle no puede tumbar la ejecución: se reintenta en la
+            # vuelta siguiente, y si redis no vuelve, el plazo máximo sigue
+            # estando ahí como red de seguridad.
+            if self._al_latir is not None:
+                try:
+                    self._al_latir()
+                except Exception:       # noqa: BLE001 - ver comentario de arriba
+                    pass
+            if self._cancelacion_pedida is None:
+                continue
+            try:
+                pedida = self._cancelacion_pedida()
+            except Exception:           # noqa: BLE001
+                continue
+            if pedida:
+                with self._lock:
+                    if self.tarea.estado != "en_curso" or self.tarea.motivo:
+                        return
+                    self.tarea.motivo = "cancelada"
+                matar_proceso(proceso)
+                return
+
+    def _registrar(self, linea: str) -> None:
+        if not linea.strip():
+            return
+        tarea = self.tarea
+        with self._lock:
+            progreso, paso = _leer_progreso(linea)
+            if progreso is not None:
+                tarea.progreso = progreso
+            if paso:
+                tarea.paso = paso
+            # Las líneas de progreso se sustituyen entre sí en vez de acumularse:
+            # el reentrenamiento emite una cada 5% por modelo y, si no, la línea
+            # que queda al final (la que explica un fallo) sería una de ellas.
+            es_progreso = _PROGRESO_PCT.match(linea) is not None
+            if es_progreso and tarea.lineas and _PROGRESO_PCT.match(tarea.lineas[-1]):
+                tarea.lineas[-1] = linea
+            else:
+                tarea.lineas.append(linea)
+                del tarea.lineas[:-MAX_LINEAS]
+        if self._al_cambiar is not None:
+            self._al_cambiar(tarea)
 
 
 class GestorTareas:
@@ -260,103 +499,27 @@ class GestorTareas:
 
     # --- Ejecución ------------------------------------------------------------
     def _ejecutar(self, tarea: Tarea) -> None:
-        # PYTHONUNBUFFERED para ver el progreso en vivo (si no, el hijo bufferiza
-        # al no escribir a una consola) y PYTHONIOENCODING porque los nombres de
-        # jugador llevan caracteres fuera de latin-1.
-        entorno = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
-        try:
-            proceso = subprocess.Popen(
-                tarea.comando,
-                cwd=str(self.cwd),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env=entorno,
-            )
-        except OSError as exc:
-            self._cerrar(tarea, codigo=-1, ultima_linea=f"No se pudo lanzar: {exc}")
-            return
+        """Corre la tarea en ESTE proceso y la cierra. Bloquea hasta que acaba.
 
-        with self._lock:
-            tarea.proceso = proceso
-        # La marca se escribe con el pid del HIJO, que es el que sobrevive a un
-        # reinicio de la app; por eso se escribe aquí y no en `lanzar`, donde
-        # todavía no existe.
-        self._escribir_marca(tarea, proceso.pid)
-
-        # Vigilante del plazo. Es un temporizador y no una comprobación dentro
-        # del bucle porque el bucle está BLOQUEADO leyendo la salida del hijo: si
-        # el hijo se cuelga sin escribir nada, ese bucle no vuelve a ejecutarse
-        # nunca y cualquier comprobación suya llegaría tarde para siempre.
-        vigilante = None
-        if self.duracion_max:
-            vigilante = threading.Timer(
-                self.duracion_max, self._vencer, args=(tarea, proceso))
-            vigilante.daemon = True
-            vigilante.start()
-
-        try:
-            # En modo texto Python traduce `\r` como fin de línea, así que la
-            # barra de progreso del hijo (que reescribe la misma línea con `\r`)
-            # llega aquí como una línea por actualización, sin tratamiento
-            # especial.
-            assert proceso.stdout is not None
-            for linea in proceso.stdout:
-                self._registrar(tarea, linea.rstrip("\n"))
-            codigo = proceso.wait()
-        finally:
-            if vigilante is not None:
-                vigilante.cancel()
-
-        # El texto se compone solo si hace falta: `duracion_max` puede ser None
-        # (sin plazo) y formatearlo entonces reventaría el hilo justo al cerrar.
-        nota = ""
-        if tarea.motivo == "timeout":
-            nota = (f"La tarea excedió el máximo de {self.duracion_max:.0f} s "
-                    f"y se ha detenido.")
-        elif tarea.motivo == "cancelada":
-            nota = "Cancelada desde la interfaz."
-        # Un proceso matado devuelve un código distinto de 0 en todos los
-        # sistemas, así que `_cerrar` ya la marcaría fallida; el motivo es para
-        # que la página diga POR QUÉ y no solo que falló.
+        El trabajo lo hace `Ejecutor`, que es justo lo que este gestor comparte
+        con el worker de la cola (`src.app.worker`). Aquí no hacen falta ni
+        `al_cambiar` (la `Tarea` que muta es la misma que lee la página) ni
+        `cancelacion_pedida` (`cancelar` tiene el `Popen` a mano y lo mata
+        directamente), así que sólo se engancha la marca en disco.
+        """
+        codigo, nota = Ejecutor(
+            tarea,
+            cwd=self.cwd,
+            duracion_max=self.duracion_max,
+            lock=self._lock,
+            al_arrancar=self._escribir_marca,
+        ).correr()
         self._cerrar(tarea, codigo=codigo, ultima_linea=nota)
-
-    def _vencer(self, tarea: Tarea, proceso: subprocess.Popen) -> None:
-        """Se cumplió el plazo: se mata al hijo y se anota el motivo."""
-        with self._lock:
-            if tarea.estado != "en_curso" or tarea.motivo:
-                return          # ya terminó, o ya la estaban cancelando
-            tarea.motivo = "timeout"
-        self._matar(proceso)
 
     @staticmethod
     def _matar(proceso: subprocess.Popen) -> None:
         """`kill` tolerante: que el hijo ya haya muerto no es un error."""
-        try:
-            proceso.kill()
-        except (OSError, ValueError):
-            pass
-
-    def _registrar(self, tarea: Tarea, linea: str) -> None:
-        if not linea.strip():
-            return
-        with self._lock:
-            progreso, paso = _leer_progreso(linea)
-            if progreso is not None:
-                tarea.progreso = progreso
-            if paso:
-                tarea.paso = paso
-            # Las líneas de progreso se sustituyen entre sí en vez de acumularse:
-            # el reentrenamiento emite una cada 5% por modelo y, si no, la línea
-            # que queda al final (la que explica un fallo) sería una de ellas.
-            es_progreso = _PROGRESO_PCT.match(linea) is not None
-            if es_progreso and tarea.lineas and _PROGRESO_PCT.match(tarea.lineas[-1]):
-                tarea.lineas[-1] = linea
-            else:
-                tarea.lineas.append(linea)
-                del tarea.lineas[:-MAX_LINEAS]
+        matar_proceso(proceso)
 
     def _cerrar(self, tarea: Tarea, codigo: int, ultima_linea: str = "") -> None:
         with self._lock:
@@ -376,44 +539,56 @@ class GestorTareas:
 
     # --- Marca en disco -------------------------------------------------------
     def _escribir_marca(self, tarea: Tarea, pid: int) -> None:
-        """Deja constancia en disco de que hay un subproceso vivo.
-
-        Se escribe en cuanto el hijo existe y se borra al cerrar la tarea. Si al
-        levantar la app la marca sigue ahí con un pid vivo, es un huérfano de una
-        ejecución anterior: la app lo avisa (ver `leer_marca` y `pid_vivo`),
-        porque dos procesos escribiendo el mismo SQLite es riesgo de corrupción.
-
-        `pid` es el del HIJO, no el de la app: el hijo es el que sobrevive al
-        reinicio. Se guarda también `pid_app` para saber quién lo lanzó.
-
-        Un fallo al escribirla no impide lanzar la tarea: es un aviso, no un
-        cerrojo.
-        """
-        if self.ruta_marca is None:
-            return
-        try:
-            self.ruta_marca.parent.mkdir(parents=True, exist_ok=True)
-            self.ruta_marca.write_text(
-                json.dumps({
-                    "pid": pid,
-                    "pid_app": os.getpid(),
-                    "tipo": tarea.tipo,
-                    "usuario": tarea.usuario,
-                    "inicio": tarea.inicio,
-                    "id": tarea.id,
-                }, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
+        escribir_marca(self.ruta_marca, tarea, pid)
 
     def _borrar_marca(self) -> None:
-        if self.ruta_marca is None:
-            return
-        try:
-            self.ruta_marca.unlink(missing_ok=True)
-        except OSError:
-            pass
+        borrar_marca(self.ruta_marca)
+
+
+def escribir_marca(ruta: Path | None, tarea: Tarea, pid: int) -> None:
+    """Deja constancia en disco de que hay un subproceso vivo.
+
+    Se escribe en cuanto el hijo existe y se borra al cerrar la tarea. Si al
+    levantar la app la marca sigue ahí con un pid vivo, es un huérfano de una
+    ejecución anterior: la app lo avisa (ver `leer_marca` y `pid_vivo`), porque
+    dos procesos escribiendo el mismo SQLite es riesgo de corrupción.
+
+    `pid` es el del HIJO, no el del proceso que lo lanzó: el hijo es el que
+    sobrevive al reinicio. Se guarda también `pid_app` para saber quién lo lanzó.
+
+    Es una función de módulo y no un método porque la escriben DOS: el gestor
+    local y el worker de la cola (`src.app.worker`), que corre en otro contenedor
+    sobre el mismo `outputs/`. Con un formato por escritor, el aviso de huérfano
+    entendería la mitad de las marcas.
+
+    Un fallo al escribirla no impide lanzar la tarea: es un aviso, no un cerrojo.
+    """
+    if ruta is None:
+        return
+    try:
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        ruta.write_text(
+            json.dumps({
+                "pid": pid,
+                "pid_app": os.getpid(),
+                "tipo": tarea.tipo,
+                "usuario": tarea.usuario,
+                "inicio": tarea.inicio,
+                "id": tarea.id,
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def borrar_marca(ruta: Path | None) -> None:
+    if ruta is None:
+        return
+    try:
+        ruta.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def leer_marca(ruta: Path | None) -> dict | None:

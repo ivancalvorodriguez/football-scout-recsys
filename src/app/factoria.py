@@ -176,6 +176,40 @@ def _clave_de_firma(app: Flask, produccion: bool) -> None:
     )
 
 
+def _gestor_de_tareas(app: Flask, ajustes):
+    """El gestor de tareas que toque: en proceso, o encolando para el worker.
+
+    Los dos cumplen el mismo contrato (`lanzar`, `ultima`, `hay_alguna_en_curso`,
+    `cancelar`), así que `rutas_datos` no sabe cuál le ha tocado.
+
+    - **Sin `SCOUTING_COLA`** (el defecto): `tareas.GestorTareas`. La app ejecuta
+      las tareas largas en su propio proceso, que es lo que se quiere en
+      desarrollo y en un despliegue de un solo contenedor.
+    - **Con `SCOUTING_COLA`**: `cola.GestorRedis`. La app encola y ejecuta el
+      contenedor `worker`. Ahí un reentrenamiento deja de competir con el
+      servidor web, y reiniciar la app deja de matar la tarea en curso.
+
+    En los dos casos el directorio de trabajo es la raíz del repo: es donde `-m`
+    encuentra el paquete `src` y donde las rutas relativas (`open-data/data`,
+    `outputs/`) significan lo mismo que en los CLI.
+    """
+    comun = dict(
+        cwd=config_app.RAIZ_REPO,
+        duracion_max=ajustes.duracion_max_tarea,
+        ruta_marca=ajustes.ruta_marca_tarea,
+    )
+    url = getattr(ajustes, "url_cola", "") or ""
+    if not url:
+        return GestorTareas(**comun)
+    # Import local: `redis` es una dependencia que sólo hace falta con cola, y
+    # `src.app` tiene que poder importarse sin ella (el pipeline la importa para
+    # nada, pero la suite recorre el paquete entero).
+    from .cola import GestorRedis         # noqa: PLC0415
+
+    app.logger.info("Tareas en cola (%s): las ejecuta el worker.", url)
+    return GestorRedis(url, **comun)
+
+
 def _avisar_de_multiproceso(app: Flask) -> None:
     """Avisa si se detecta un servidor de varios PROCESOS.
 
@@ -215,6 +249,7 @@ def crear_app(
     db_path: Path | str | None = None,
     ruta_usuarios: Path | str | None = None,
     ruta_marca: Path | str | None = None,
+    url_cola: str | None = None,
     produccion: bool = False,
     nivel_log: str | int | None = None,
     testing: bool = False,
@@ -232,6 +267,12 @@ def crear_app(
 
     `produccion` endurece la instancia: exige `SCOUTING_SECRET_KEY` y deja de
     enseñar rutas absolutas del servidor y líneas de comandos en `/datos`.
+
+    `url_cola` decide QUIÉN ejecuta las tareas largas de `/datos`: vacía, este
+    mismo proceso; con una URL de redis, el contenedor `worker` (ver
+    `_gestor_de_tareas`). Por defecto la dice el entorno (`SCOUTING_COLA`), salvo
+    en `testing`, donde se ignora: la suite no debe depender de que haya —o no
+    haya— un redis en la máquina donde se ejecuta.
     """
     app = Flask(__name__)
     ajustes = config_app.Config(
@@ -245,6 +286,8 @@ def crear_app(
         # avisarían de huérfanos que no son suyos.
         ruta_marca_tarea=Path(ruta_marca) if ruta_marca is not None
         else config_app.Config.ruta_marca_tarea,
+        url_cola=url_cola if url_cola is not None
+        else ("" if testing else config_app.url_cola()),
         produccion=produccion,
     )
     app.config["APP_SIMILITUD"] = ajustes
@@ -271,14 +314,7 @@ def crear_app(
     app.extensions["datos"] = CatalogoDatos(ajustes.db_path)
     app.extensions["fuentes"] = Fuentes(ajustes.db_path)
     app.extensions["usuarios"] = Usuarios(ajustes.ruta_usuarios)
-    # Las tareas se lanzan como `python -m src.incremental...` desde la raíz del
-    # repo: es donde `-m` encuentra el paquete `src` y donde las rutas relativas
-    # (`open-data/data`, `outputs/`) significan lo mismo que en los CLI.
-    app.extensions["tareas"] = GestorTareas(
-        cwd=config_app.RAIZ_REPO,
-        duracion_max=ajustes.duracion_max_tarea,
-        ruta_marca=ajustes.ruta_marca_tarea,
-    )
+    app.extensions["tareas"] = _gestor_de_tareas(app, ajustes)
     # Las plantillas escriben `entidad.ligas | ligas` o `entidad.id | equipo` en
     # vez de arrastrar los catálogos por todos los contextos.
     app.add_template_filter(_filtro_ligas(app), "ligas")
