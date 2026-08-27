@@ -99,7 +99,7 @@ class TestCoberturaDeHiperparametros:
 class TestCalcular:
     def test_recoge_la_celda_los_datos_y_el_codigo(self, h: dict) -> None:
         assert h["celda"] == {"formulacion": "2", "entidad": "equipo",
-                              "normalizacion": "global"}
+                              "normalizacion": "global", "distancia": "euclidea"}
         assert set(h["datos"]) == {"bytes", "mtime_ns"}
         assert len(h["codigo"]) == 64          # sha256 en hexadecimal
 

@@ -20,7 +20,29 @@ from pathlib import Path
 
 import numpy as np
 
+from . import distancias
 from .features import MatrizFeatures
+
+
+def stem_artefacto(
+    formulacion: str, entidad: str, normalizacion: str,
+    distancia: str = distancias.POR_DEFECTO,
+) -> str:
+    """Nombre base de un artefacto (y, con otro sufijo, de su estado warm).
+
+    `formulacion5_jugador_por_liga`, y con la distancia detras cuando NO es la
+    euclidea: `formulacion5_jugador_por_liga_manhattan`. La asimetria es
+    deliberada y es la misma que ya tenia la normalizacion (`cargar_modelo` cae
+    al nombre sin sufijo): la euclidea es la distancia con la que se construyo
+    todo lo que hay en `outputs/`, y darle sufijo obligaria a renombrar miles de
+    ficheros —artefactos, estados warm y huellas de ~1.100 combinaciones de
+    barrido— para no cambiar ni un numero. Los CSV y las tablas, en cambio, SI
+    la nombran siempre (`euclidea`), porque ahi el coste es cero y lo que
+    importa es que ningun resultado quede sin declarar con que geometria se midio.
+    """
+    base = f"formulacion{formulacion}_{entidad}_{normalizacion}"
+    distancia = distancias.validar(distancia)
+    return base if distancia == distancias.POR_DEFECTO else f"{base}_{distancia}"
 
 
 @dataclass
@@ -103,9 +125,14 @@ class ModeloSimilitud:
     def guardar(self, out_dir: Path) -> Path:
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        # El nombre del artefacto refleja siempre la normalizacion del modelo.
+        # El nombre del artefacto refleja siempre la normalizacion del modelo, y
+        # la distancia cuando no es la euclidea (ver `stem_artefacto`).
         sufijo = self.meta.get("normalizacion")
-        stem = self._stem(sufijo=sufijo)
+        stem = (
+            stem_artefacto(self.formulacion, self.entidad, sufijo,
+                           self.meta.get("distancia") or distancias.POR_DEFECTO)
+            if sufijo else self._stem()
+        )
         np.savez_compressed(
             out_dir / f"{stem}.npz",
             S=self.S,
@@ -129,24 +156,33 @@ def cargar_modelo(
     formulacion: str,
     entidad: str,
     normalizacion: str = "por_liga",
+    distancia: str = distancias.POR_DEFECTO,
 ) -> ModeloSimilitud:
-    """Carga un modelo guardado (`<form>_<entidad>[_<normalizacion>]` en `model_dir`).
+    """Carga un modelo guardado (`<form>_<entidad>[_<norm>][_<distancia>]`).
 
-    `normalizacion` añade el sufijo al nombre del artefacto. Default `por_liga`
-    para no romper el flujo previo (los modelos antiguos no tenian sufijo, asi
-    que se resuelve a `formulacion{2,5}_{entidad}.{npz,json}` directamente).
+    `normalizacion` y `distancia` componen el nombre del artefacto con
+    `stem_artefacto`. Los dos defaults (`por_liga`, `euclidea`) son los
+    historicos, para no romper el flujo previo.
 
-    El fallback al artefacto sin sufijo SOLO aplica al default historico
-    `por_liga`: un modelo antiguo no lleva normalizacion global, asi que caer a el
-    cuando se pide `global` serviria en silencio un modelo equivocado. Para
-    cualquier normalizacion distinta de `por_liga` se exige el artefacto con
-    sufijo y, si no existe, se lanza `FileNotFoundError`.
+    Hay DOS fallbacks, los dos acotados al default correspondiente y por el mismo
+    motivo: caer a un artefacto que no declara una variante solo es seguro cuando
+    lo que se pide es la variante que ese artefacto tenia.
+
+    - Sin sufijo de distancia = euclidea, siempre (es lo que se construyo antes
+      de que la distancia fuera un parametro). Pedir `manhattan` y servir el
+      artefacto sin sufijo daria un ranking de otra geometria, asi que ahi se
+      exige el nombre completo y, si no esta, se lanza `FileNotFoundError`.
+    - Sin sufijo de normalizacion = `por_liga`, como hasta ahora.
     """
     model_dir = Path(model_dir)
     base = f"formulacion{formulacion}_{entidad}"
-    candidatos = [model_dir / f"{base}_{normalizacion}.npz"]
-    # Compatibilidad: el artefacto antiguo sin sufijo solo vale como `por_liga`.
-    if normalizacion == "por_liga":
+    distancia = distancias.validar(distancia)
+    candidatos = [
+        model_dir / f"{stem_artefacto(formulacion, entidad, normalizacion, distancia)}.npz"
+    ]
+    # Compatibilidad: el artefacto antiguo sin sufijo solo vale como
+    # `por_liga` + `euclidea`, que es con lo que se construyo.
+    if normalizacion == "por_liga" and distancia == distancias.POR_DEFECTO:
         candidatos.append(model_dir / f"{base}.npz")
     stem = None
     for npz in candidatos:
@@ -155,8 +191,8 @@ def cargar_modelo(
             break
     if stem is None:
         raise FileNotFoundError(
-            f"No se encontro modelo para {base} (normalizacion={normalizacion!r}) "
-            f"en {model_dir}. Probado: "
+            f"No se encontro modelo para {base} (normalizacion={normalizacion!r}, "
+            f"distancia={distancia!r}) en {model_dir}. Probado: "
             + ", ".join(p.name for p in candidatos)
         )
     arr = np.load(model_dir / f"{stem}.npz", allow_pickle=False)
@@ -181,6 +217,11 @@ def top_k(modelo: ModeloSimilitud, i: int, k: int) -> list[tuple[int, float]]:
     un 0 significa "sin relacion aprendida", no "similar"; incluirlos rellenaria
     el top-k con entidades arbitrarias en orden de indice. Puede devolver menos de
     k resultados si la entidad esta poco conectada (comportamiento honesto).
+
+    El ranking es el del MODELO y no se filtra por quien consulta: si la base de
+    datos elegida no tiene a una de las candidatas, sigue saliendo (el artefacto
+    trae su nombre, su liga y su vector) y es la app la que la rotula como «no
+    esta en estos datos». Esconderla tiraria informacion que el modelo si tiene.
     """
     fila = modelo.S[i].copy()
     fila[i] = -np.inf  # nunca recomendarse a si misma

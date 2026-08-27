@@ -44,6 +44,83 @@ class TestEntidad:
             servicio.indice_por_id(modelo_jugador, 999)
 
 
+class TestEntidadesQueLaBdNoTiene:
+    """Una entidad que esta en la S y no en la BD con la que se consulta.
+
+    El reparto es asimetrico a proposito:
+
+    - **No se le puede pedir nada A ELLA** (buscarla, usarla de referencia, abrir
+      su ficha): sin sus estadisticas no hay equipo, ni posiciones, ni valores
+      reales, ni forma de derivar su perfil.
+    - **Si puede salir como CANDIDATA de otra**: ahi el artefacto ya trae todo lo
+      que hace falta (nombre, liga, puntuacion) y esconderla tiraria justamente lo
+      que el modelo sabe. Sale marcada y la interfaz no la enlaza.
+
+    Aqui se comprueba la mitad de dominio; que las vistas la usen esta en
+    `src/tests/app/integracion/test_rutas.py`.
+
+    `sin_datos` son INDICES de S y llegan calculados desde `rutas._sin_datos`:
+    `servicio` no sabe nada de bases de datos.
+    """
+
+    def test_no_se_ofrecen_en_la_busqueda(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        con_todos = servicio.buscar(modelo_jugador, "Garcia")
+        indices = {e.indice for e in con_todos}
+        assert len(indices) >= 2, "el fixture tiene que traer dos Garcia"
+        escondido = min(indices)
+        encontrados = servicio.buscar(
+            modelo_jugador, "Garcia", sin_datos=frozenset({escondido}))
+        assert {e.indice for e in encontrados} == indices - {escondido}
+
+    def test_pedirla_por_id_falla_explicando_el_motivo(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        """`EntidadSinDatos` y no un `EntidadDesconocida` a secas: el motivo tiene
+        arreglo (elegir otra base de datos) y el mensaje tiene que decirlo."""
+        with pytest.raises(servicio.EntidadSinDatos) as fallo:
+            servicio.indice_por_id(modelo_jugador, 30, sin_datos=frozenset({2}))
+        assert "está en el modelo" in str(fallo.value)
+        assert "no tiene a este jugador" in str(fallo.value)
+
+    def test_sigue_siendo_un_entidad_desconocida(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        """Para quien consulta, una entidad sin datos NO existe: las vistas que ya
+        tratan el «no encontrado» no tienen que aprender un caso nuevo."""
+        assert issubclass(servicio.EntidadSinDatos, servicio.EntidadDesconocida)
+
+    def test_como_CANDIDATA_si_sale_pero_marcada(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        """El ranking es el del modelo y no se filtra por quien consulta.
+
+        Esconderla tiraría lo que el modelo sí sabe —cuánto se parece— cuando el
+        artefacto trae su nombre, su liga y su vector. Lo que no tiene es ficha, y
+        por eso la interfaz la rotula y no la enlaza (`Entidad.en_datos`).
+        """
+        rec = servicio.recomendar(modelo_jugador, 0, k=3)
+        marcado = rec.candidatos[0].entidad.indice
+        con_marca = servicio.recomendar(
+            modelo_jugador, 0, k=3, sin_datos=frozenset({marcado}))
+        # Mismo ranking, misma longitud: solo cambia el rótulo.
+        assert ([c.entidad.indice for c in con_marca.candidatos]
+                == [c.entidad.indice for c in rec.candidatos])
+        marcas = {c.entidad.indice: c.entidad.en_datos for c in con_marca.candidatos}
+        assert marcas[marcado] is False
+        assert all(v for i, v in marcas.items() if i != marcado)
+
+    def test_sin_exclusiones_todas_van_marcadas_como_presentes(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        """El caso normal (BD y modelo emparejados) no paga nada."""
+        assert servicio.indice_por_id(modelo_jugador, 30) == 2
+        rec = servicio.recomendar(modelo_jugador, 0, k=3)
+        assert rec.referencia.en_datos
+        assert all(c.entidad.en_datos for c in rec.candidatos)
+
+
 class TestBuscar:
     def test_coincidencia_parcial_sin_acentos_ni_mayusculas(
         self, modelo_jugador: ModeloSimilitud
@@ -445,3 +522,139 @@ def _modelo(nombres: list[str], **cambios) -> ModeloSimilitud:
     )
     argumentos.update(cambios)
     return ModeloSimilitud(**argumentos)
+
+
+class TestBuscarAusentes:
+    """Las entidades que estan en la BD y no en el modelo tambien se buscan."""
+
+    NOMBRES_BD = {10: "Lionel Messi", 20: "Luis Suarez", 80: "Fichaje Reciente",
+                  81: "Otro Fichaje"}
+
+    def test_solo_ofrece_las_que_el_modelo_no_tiene(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        """Las que si estan salen por `buscar`, con su fila de S: ofrecerlas
+        tambien aqui las duplicaria y les daria la respuesta peor."""
+        encontradas = servicio.buscar_ausentes(
+            modelo_jugador, self.NOMBRES_BD, "i")
+        assert {e.id for e in encontradas} == {80, 81}
+
+    def test_van_marcadas_como_fuera_del_modelo(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        encontradas = servicio.buscar_ausentes(
+            modelo_jugador, self.NOMBRES_BD, "Fichaje")
+        assert encontradas and all(not e.en_modelo for e in encontradas)
+        assert all(e.indice == servicio.FUERA_DEL_MODELO for e in encontradas)
+
+    def test_ordena_igual_que_la_busqueda_normal(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        """Exacta primero, luego por el principio, luego en cualquier posicion:
+        la misma regla, para que las dos listas se lean como una sola."""
+        nombres = {80: "Reciente", 81: "Fichaje Reciente", 82: "Recientemente"}
+        orden = [e.nombre for e in servicio.buscar_ausentes(
+            modelo_jugador, nombres, "Reciente")]
+        assert orden == ["Reciente", "Recientemente", "Fichaje Reciente"]
+
+    def test_sin_bd_no_hay_nada_que_anadir(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        """La BD es opcional en toda la app: sin ella, la busqueda es la de antes."""
+        assert servicio.buscar_ausentes(modelo_jugador, None, "Messi") == []
+
+    def test_el_limite_se_respeta(self, modelo_jugador: ModeloSimilitud) -> None:
+        nombres = {i: f"Jugador {i}" for i in range(100, 120)}
+        assert len(servicio.buscar_ausentes(
+            modelo_jugador, nombres, "Jugador", limite=3)) == 3
+
+
+class _Proyectada:
+    """Lo minimo que `recomendar_proyectada` necesita (ver su docstring)."""
+
+    def __init__(self, modelo: ModeloSimilitud, display=None,
+                 fidelidad: str = "fiel") -> None:
+        self.id = 999
+        self.nombre = "Entidad Nueva"
+        self.ligas = ("11-27",)
+        self.display = (np.linspace(-1.0, 1.0, len(modelo.feat_names))
+                        if display is None else display)
+        self.fidelidad = fidelidad
+        self.proyeccion = self._Puntuacion(modelo)
+
+    class _Puntuacion:
+        def __init__(self, modelo: ModeloSimilitud) -> None:
+            self._ids = [int(i) for i in modelo.entity_ids]
+
+        def top(self, k: int):
+            # Puntuaciones decrecientes y distintas, como las de una proyeccion.
+            return [(i, 1.0 - 0.1 * n) for n, i in enumerate(self._ids[:k])]
+
+
+class TestRecomendarProyectada:
+    def test_devuelve_candidatos_del_modelo(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        rec = servicio.recomendar_proyectada(
+            modelo_jugador, _Proyectada(modelo_jugador), k=3)
+        assert len(rec.candidatos) == 3
+        assert all(c.entidad.en_modelo for c in rec.candidatos)
+        assert [c.rango for c in rec.candidatos] == [1, 2, 3]
+
+    def test_la_referencia_va_marcada_como_proyectada(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        """Es lo que la interfaz y la API usan para no presentarla como un top-k
+        leido de la matriz."""
+        rec = servicio.recomendar_proyectada(
+            modelo_jugador, _Proyectada(modelo_jugador, fidelidad="aproximada"), k=2)
+        assert rec.proyectada == "aproximada"
+        assert not rec.referencia.en_modelo
+        assert rec.referencia.nombre == "Entidad Nueva"
+
+    def test_explica_la_recomendacion_como_cualquier_otra(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        """Radar, coincidencias y rasgos salen del vector derivado de la BD: sin
+        ellos la recomendacion no se podria leer."""
+        rec = servicio.recomendar_proyectada(
+            modelo_jugador, _Proyectada(modelo_jugador), k=2, n_coincidencias=2)
+        assert len(rec.perfil) == len(fases.FASES_JUGADOR)
+        assert rec.rasgos and all(len(c.coincidencias) == 2 for c in rec.candidatos)
+
+    def test_el_perfil_se_calcula_dentro_del_universo_del_modelo(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        """Un percentil necesita un universo: el de la entidad proyectada es el
+        del modelo con ella dentro, no el suyo propio (que seria siempre 0,5)."""
+        matriz, indice = servicio.matriz_ampliada(
+            modelo_jugador, np.full(len(modelo_jugador.feat_names), 99.0))
+        assert indice == len(modelo_jugador.entity_ids)
+        assert matriz.percentil.shape[0] == indice + 1
+        # Un vector extremo tiene que quedar arriba del todo.
+        medibles = [f for f, ok in enumerate(matriz.medibles) if ok]
+        assert all(matriz.percentil[indice, f] >= 0.9 for f in medibles)
+
+    def test_los_valores_reales_de_la_referencia_entran_aparte(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        """No estan en la tabla del modelo (no tiene fila): se pasan sueltos."""
+        crudo = np.arange(len(modelo_jugador.feat_names), dtype=float)
+        rec = servicio.recomendar_proyectada(
+            modelo_jugador, _Proyectada(modelo_jugador), k=1, n_coincidencias=1,
+            crudo_referencia=crudo)
+        coincidencia = rec.candidatos[0].coincidencias[0]
+        assert coincidencia.referencia_cruda is not None
+        assert coincidencia.candidato_cruda is None      # sin tabla del modelo
+
+
+class TestFichaProyectada:
+    def test_tiene_perfil_y_puntos_fuertes(
+        self, modelo_jugador: ModeloSimilitud
+    ) -> None:
+        detalle = servicio.ficha_proyectada(
+            modelo_jugador, _Proyectada(modelo_jugador), n_rasgos=2)
+        assert detalle.proyectada == "fiel"
+        assert len(detalle.perfil) == len(fases.FASES_JUGADOR)
+        assert len(detalle.destacados) == len(detalle.flojos) == 2
+        assert not detalle.entidad.en_modelo

@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.evaluacion import barrido, huella, registro
+from src.evaluacion import barrido, evaluar, huella, registro
 from src.evaluacion import config as ecfg
 from src.similitud import config as scfg
 from src.tests.evaluacion.conftest import fila_metrica, modelo_sintetico
@@ -147,6 +147,117 @@ class TestEjesYCombinaciones:
     def test_la_configuracion_efectiva_completa_con_los_defaults(self) -> None:
         efectiva = barrido._config_efectiva({"F2_L1": 0.9}, ["F2_L1", "F2_BETA"])
         assert efectiva == {"F2_L1": 0.9, "F2_BETA": scfg.F2_BETA}
+
+
+class TestMetodoF5:
+    """`--metodo-f5`: elegir el algoritmo de la etapa 1 de la F5.
+
+    Es una flag y no una entrada de `HIPERPARAMETROS`, pero se comporta como un
+    eje mas: eso es lo que hace que no pise lo acumulado en la carpeta.
+    """
+
+    def test_sin_la_flag_no_se_inyecta_nada(self, rejilla_pequena) -> None:
+        """El default es la eleccion POR ENTIDAD de `similitud.config`, y no anade
+        ningun eje: una tanda sin la flag tiene exactamente la rejilla de siempre.
+        """
+        assert barrido._metodos_f5("") == ()
+        assert barrido._metodos_f5("   ") == ()
+        assert barrido.configuraciones(("5",), ("equipo",)) == \
+            barrido.configuraciones(("5",), ("equipo",), [])
+
+    def test_un_metodo_desconocido_aborta(self) -> None:
+        with pytest.raises(SystemExit, match="metodos de la F5 desconocidas"):
+            barrido._metodos_f5("bures")
+
+    def test_el_orden_no_depende_de_como_se_escriba(self) -> None:
+        """La rejilla se recorre igual con `sinkhorn,mmd` que con `mmd,sinkhorn`."""
+        assert barrido._metodos_f5("sinkhorn,mmd") == ecfg.METODOS_F5
+
+    def test_inyecta_un_eje_por_entidad(self) -> None:
+        """El metodo son DOS atributos de config, uno por entidad."""
+        assert [a for a, _ in barrido._ejes_metodo_f5(("mmd",))] == [
+            "F5_METODO_JUGADOR", "F5_METODO_EQUIPO"]
+
+    def test_cada_entidad_solo_ve_su_eje(self, rejilla_pequena) -> None:
+        """Lo hace el alcance por celda de `huella`: barrer el metodo del jugador
+        no puede reconstruir ni un modelo de equipo.
+        """
+        ejes = barrido._ejes_metodo_f5(ecfg.METODOS_F5)
+        assert barrido._ejes_relevantes(("5",), ("equipo",), ejes) == [
+            "F5_EASE_LAMBDA", "F5_METODO_EQUIPO"]
+        assert barrido._ejes_relevantes(("5",), ("jugador",), ejes) == [
+            "F5_EASE_LAMBDA", "F5_METODO_JUGADOR"]
+
+    def test_no_afecta_a_la_formulacion_2(self, rejilla_pequena) -> None:
+        ejes = barrido._ejes_metodo_f5(ecfg.METODOS_F5)
+        assert barrido._ejes_relevantes(("2",), ("jugador", "equipo"), ejes) == \
+            ["F2_L1"]
+
+    def test_dos_metodos_duplican_las_combinaciones_de_esa_entidad(
+        self, rejilla_pequena
+    ) -> None:
+        ejes = barrido._ejes_metodo_f5(ecfg.METODOS_F5)
+        combos = barrido.configuraciones(("5",), ("equipo",), ejes)
+        assert len(combos) == 4          # 2 lambdas x 2 metodos
+        assert {c["F5_METODO_EQUIPO"] for c in combos} == set(ecfg.METODOS_F5)
+
+    def test_un_solo_metodo_no_amplia_la_rejilla(self, rejilla_pequena) -> None:
+        """Forzar el metodo es una columna con un unico valor, no un eje: cuesta
+        lo mismo que la tanda de siempre.
+        """
+        ejes = barrido._ejes_metodo_f5(("mmd",))
+        combos = barrido.configuraciones(("5",), ("equipo",), ejes)
+        assert len(combos) == 2
+        assert all(c["F5_METODO_EQUIPO"] == "mmd" for c in combos)
+
+    def test_el_metodo_entra_en_la_identidad_de_la_combinacion(
+        self, rejilla_pequena
+    ) -> None:
+        """Sin esto, un barrido con la flag reutilizaria los `vNN` del que se
+        lanzo sin ella y `barrido_metricas.csv` se sobrescribiria a si mismo con
+        numeros de otro modelo.
+        """
+        ejes = barrido._ejes_metodo_f5(ecfg.METODOS_F5)
+        publicados = barrido._ejes_publicados(None, ejes)
+        assert publicados[-2:] == ["F5_METODO_JUGADOR", "F5_METODO_EQUIPO"]
+
+        mismo_eje = ["F5_METODO_EQUIPO"]
+        assert registro.clave({"F5_METODO_EQUIPO": "mmd"}, mismo_eje) != \
+            registro.clave({"F5_METODO_EQUIPO": "sinkhorn"}, mismo_eje)
+
+    def test_el_metodo_entra_en_la_huella_del_artefacto(self) -> None:
+        """La otra mitad: dos celdas con metodos distintos no comparten artefacto."""
+        assert "F5_METODO_EQUIPO" in huella.alcance("5", "equipo")
+        assert "F5_METODO_JUGADOR" in huella.alcance("5", "jugador")
+
+    def test_declararlo_tambien_en_hiperparametros_aborta(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dos fuentes para el mismo atributo: una ganaria en silencio."""
+        monkeypatch.setattr(barrido, "HIPERPARAMETROS",
+                            [("F5_METODO_EQUIPO", ["mmd"])])
+        with pytest.raises(SystemExit, match="dos veces"):
+            barrido._validar_hiperparametros(barrido._ejes_metodo_f5(("sinkhorn",)))
+
+    def test_avisa_de_que_no_hace_nada_sin_la_formulacion_5(self) -> None:
+        avisos = barrido._avisos_metodo_f5(("mmd",), ("2",), ("equipo",), {"0"})
+        assert len(avisos) == 1 and "no tiene efecto" in avisos[0]
+
+    def test_avisa_del_coste_de_sinkhorn_sobre_jugador(self) -> None:
+        """Es el caso caro (~3,6 h por artefacto frente a ~4 s del mmd): mejor
+        saberlo antes de lanzar la tanda que a la media hora.
+        """
+        avisos = barrido._avisos_metodo_f5(
+            ("sinkhorn",), ("5",), ("jugador",), {"0"})
+        assert any("3,6 h" in a for a in avisos)
+
+    def test_avisa_de_que_sinkhorn_se_queda_sin_fase_7(self) -> None:
+        avisos = barrido._avisos_metodo_f5(
+            ("sinkhorn",), ("5",), ("equipo",), {"0", "7"})
+        assert any("fase 7" in a for a in avisos)
+
+    def test_sin_la_flag_no_hay_avisos(self) -> None:
+        assert barrido._avisos_metodo_f5((), ("5",), ("jugador",), {"7"}) == []
 
 
 class TestCacheDeArtefactos:
@@ -297,29 +408,40 @@ class TestPlan:
 
 
 class TestTablaLarga:
-    def test_descompone_el_modelo_en_sus_tres_ejes(self) -> None:
+    def test_descompone_el_modelo_en_sus_cuatro_ejes(self) -> None:
         """La etiqueta compacta sola no dice de que eje viene cada palabra."""
         salida = {"f0": [{"formulacion": "5", "entidad": "equipo",
-                          "normalizacion": "global", "pureza_top1": 0.5,
-                          "asimetria": 0.02}]}
-        df = barrido._tabla_larga_csv({"v01": {**salida, "f1": [], "f2": [], "f5": []}})
+                          "normalizacion": "global", "distancia": "euclidea",
+                          "pureza_top1": 0.5, "asimetria": 0.02}]}
+        df = barrido._tabla_larga_csv({"v01": {**evaluar.tablas_vacias(), **salida}})
         fila = df[df["metrica"] == "asimetria"].iloc[0]
-        assert fila["modelo"] == "F5_equipo_global"
-        assert (fila["formulacion"], fila["entidad"], fila["normalizacion"]) == (
-            "5", "equipo", "global")
+        assert fila["modelo"] == "F5_equipo_global_euclidea"
+        assert (fila["formulacion"], fila["entidad"], fila["normalizacion"],
+                fila["distancia"]) == ("5", "equipo", "global", "euclidea")
+
+    def test_la_distancia_va_en_la_etiqueta_aunque_sea_la_euclidea(self) -> None:
+        """En disco la euclidea no lleva sufijo (no renombrar lo ya construido),
+        pero en un RESULTADO la geometria se declara siempre: sin ella, dos filas
+        de la misma tabla medidas distinto pareceria que son comparables.
+        """
+        salida = {"f0": [{"formulacion": "5", "entidad": "equipo",
+                          "normalizacion": "global", "distancia": "manhattan",
+                          "pureza_top1": 0.5, "asimetria": 0.02}]}
+        df = barrido._tabla_larga_csv({"v01": {**evaluar.tablas_vacias(), **salida}})
+        assert set(df["modelo"]) == {"F5_equipo_global_manhattan"}
 
     def test_la_fase_1_aporta_solo_la_direccion_media(self) -> None:
         """Las tres direcciones en la misma columna darian tres puntos por casilla."""
         base = {"formulacion": "2", "entidad": "equipo", "normalizacion": "global"}
-        salida = {"f0": [], "f2": [], "f5": [],
+        salida = {**evaluar.tablas_vacias(),
                   "f1": [{**base, "direccion": d, "top1": v, "mrr": v}
                          for d, v in (("global", 0.5), ("A->B", 0.4), ("B->A", 0.6))]}
         df = barrido._tabla_larga_csv({"v01": salida})
         assert df[df["metrica"] == "top1"]["valor"].tolist() == [0.5]
 
     def test_recoge_una_metrica_por_fase_declarada(self) -> None:
-        vacio = {k: [] for k in ("f0", "f1", "f2", "f5")}
-        assert barrido._tabla_larga_csv({"v01": vacio}).empty
+        assert barrido._tabla_larga_csv(
+            {"v01": evaluar.tablas_vacias()}).empty
 
 
 class TestComparativa:
@@ -335,12 +457,13 @@ class TestComparativa:
     def test_una_fila_por_modelo_y_una_columna_por_combinacion(self, df) -> None:
         L: list[str] = []
         barrido._tabla_comparativa(L, df, "top1", "Top-1", ["v01", "v02"])
-        assert "| formulacion | entidad | normalizacion | v01 | v02 |" in L
+        assert "| formulacion | entidad | normalizacion | distancia | v01 | v02 |" in L
 
     def test_resalta_el_mejor_valor_de_cada_fila(self, df) -> None:
         L: list[str] = []
         barrido._tabla_comparativa(L, df, "top1", "Top-1", ["v01", "v02"])
-        assert any("| F2 | equipo | global | 0.100 | **0.300** |" == ln for ln in L)
+        assert any("| F2 | equipo | global | euclidea | 0.100 | **0.300** |" == ln
+                   for ln in L)
 
     def test_para_una_metrica_de_menor_es_mejor_resalta_el_minimo(self) -> None:
         df = pd.DataFrame([
@@ -421,10 +544,21 @@ class TestComparativa:
 
     def test_los_modelos_se_agrupan_por_entidad(self) -> None:
         """Jugador y equipo no son comparables entre si: no pueden ir alternados."""
-        claves = [("2", "jugador", "global"), ("5", "equipo", "global"),
-                  ("2", "equipo", "global")]
+        claves = [("2", "jugador", "global", "euclidea"),
+                  ("5", "equipo", "global", "euclidea"),
+                  ("2", "equipo", "global", "euclidea")]
         assert [c[1] for c in sorted(claves, key=barrido._orden_modelo)] == [
             "equipo", "equipo", "jugador"]
+
+    def test_dentro_de_la_entidad_las_filas_se_agrupan_por_distancia(self) -> None:
+        """Comparar F2 con F5 tiene sentido dentro de una geometria; entre
+        geometrias lo que se compara es la geometria. Las filas de una misma
+        distancia van juntas para que se lea asi."""
+        claves = [("2", "equipo", "global", "manhattan"),
+                  ("5", "equipo", "global", "euclidea"),
+                  ("2", "equipo", "global", "euclidea")]
+        assert [c[3] for c in sorted(claves, key=barrido._orden_modelo)] == [
+            "euclidea", "euclidea", "manhattan"]
 
     def test_los_valores_no_finitos_no_entran_en_la_tabla(self) -> None:
         df = pd.DataFrame([
@@ -432,7 +566,7 @@ class TestComparativa:
             fila_metrica("v02", "F2_equipo_global", "top1", 0.3),
         ])
         assert list(barrido._valores_de(df, "top1")) == [
-            ("v02", ("2", "equipo", "global"))]
+            ("v02", ("2", "equipo", "global", "euclidea"))]
 
     def test_reconoce_lo_finito(self) -> None:
         assert barrido._es_finito(0.5)

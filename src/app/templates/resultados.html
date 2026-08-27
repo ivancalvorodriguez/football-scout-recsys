@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_enlaces.html" import enlace_ficha, url_ficha %}
+{% from "_enlaces.html" import enlace_ficha, url_ficha with context %}
 {% from "_contexto.html" import contexto_entidad %}
 
 {% block titulo %}{{ rec.referencia.nombre }} · Scouting por similitud{% endblock %}
@@ -17,6 +17,17 @@
       {{ contexto_entidad(entidad, rec.referencia) }} ·
       id {{ rec.referencia.id }}
     </p>
+
+    {# La referencia no estaba en el modelo. No es un caso de error —la respuesta
+       es útil y por eso se da— pero es de otra clase, y el usuario tiene que
+       poder distinguirla de un top-k leído de la matriz. #}
+    {% if rec.proyectada %}
+      <p class="aviso aviso-proyectada">
+        <strong>Calculado fuera del modelo.</strong>
+        {{ rec.referencia.nombre }}
+        {{ texto_proyeccion[rec.proyectada] }}
+      </p>
+    {% endif %}
 
     {% if not radar_referencia.vacio %}
       {% with radar = radar_referencia, titulo = 'Perfil por fases', amplio = true %}
@@ -70,12 +81,26 @@
         {% for c in rec.candidatos %}
           {% set comparativa = comparativas[c.entidad.indice] %}
           <li class="candidato">
+            {# El modelo puede conocer a un candidato que la base de datos elegida
+               no tiene (p. ej. un modelo entrenado con una liga de más, servido
+               sobre la BD sin ella). Sale igual —el artefacto trae su nombre, su
+               liga y su vector, y puntuarlo es justo lo que el modelo sabe
+               hacer—, pero SIN enlace: su ficha no se puede armar sin sus
+               estadísticas y no se le pueden pedir similares a él. #}
             <div class="candidato-cabecera">
               <span class="rango">{{ c.rango }}</span>
-              <a class="candidato-nombre" href="{{ url_ficha(entidad, c.entidad.id, clave) }}"
-                 title="Ver la ficha de {{ c.entidad.nombre }}">
-                {{ c.entidad.nombre }}
-              </a>
+              {% if c.entidad.en_datos %}
+                <a class="candidato-nombre" href="{{ url_ficha(entidad, c.entidad.id, clave) }}"
+                   title="Ver la ficha de {{ c.entidad.nombre }}">
+                  {{ c.entidad.nombre }}
+                </a>
+              {% else %}
+                <span class="candidato-nombre">{{ c.entidad.nombre }}</span>
+                <span class="marca-sin-datos"
+                      title="El modelo lo conoce, pero los datos elegidos no lo tienen: no hay ficha ni similares suyos, solo su parecido con la referencia">
+                  fuera de estos datos
+                </span>
+              {% endif %}
               <span class="score" title="Puntuación de la matriz S del modelo">
                 {{ '%+.4f' % c.score }}
               </span>

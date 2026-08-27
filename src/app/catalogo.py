@@ -2,11 +2,12 @@
 
 Un **modelo** de la app es una pareja de artefactos con un nombre: el de jugador
 y el de equipo. Cuál es cuál no lo elige el usuario, lo fija
-`src.similitud.config.MODELOS_SERVIBLES` (jugador con la Formulación 5, equipo
-con la 2, las dos con z-score global). El resto de combinaciones que sabe
-construir `src.similitud.build` siguen existiendo en disco y sirven para la
-comparación experimental del TFG, pero la app no las sirve: aquí se elige entre
-MODELOS, no entre formulaciones.
+`src.similitud.config.MODELOS_SERVIBLES` (las dos entidades con la Formulación 5
+y z-score `por_liga`) y `DISTANCIA_SERVIBLE` (la geometría, hoy `mahalanobis`, que
+es la que pone el sufijo del nombre de fichero). El resto de
+combinaciones que sabe construir `src.similitud.build` siguen existiendo en disco
+y sirven para la comparación experimental del TFG, pero la app no las sirve: aquí
+se elige entre MODELOS, no entre formulaciones.
 
 Hay dos clases de modelo, y las dos viven en `outputs/modelo/`:
 
@@ -20,7 +21,7 @@ artefactos con los MISMOS nombres de fichero, así que `cargar_modelo` y el
 reentrenamiento (`--modelos <origen> --out <destino>`) funcionan sobre cualquiera
 sin saber si es el base o uno con nombre.
 
-La carga es perezosa y cacheada: la matriz S de jugadores es de 2176x2176 y
+La carga es perezosa y cacheada: la matriz S de jugadores es de 2640x2640 y
 releerla en cada petición sería absurdo. Junto al modelo se cachea su
 `MatrizFases` (el perfil por fases de TODAS las entidades), que se calcula aquí y
 no en la vista porque los percentiles necesitan el universo entero: es una
@@ -39,7 +40,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from src.similitud.modelo import ModeloSimilitud, cargar_modelo
+from src.similitud import config as config_similitud
+from src.similitud.modelo import ModeloSimilitud, cargar_modelo, stem_artefacto
 
 from . import config
 from .fases import MatrizFases, construir_matriz
@@ -50,6 +52,10 @@ from .nombres import NombreInvalido, preparar, slug  # noqa: F401
 
 class ModeloNoDisponible(LookupError):
     """No hay ningún artefacto para el modelo pedido."""
+
+
+class CuotaSuperada(RuntimeError):
+    """La cuenta ya tiene tantos modelos como se le permiten."""
 
 
 # --- Identidad de un modelo ---------------------------------------------------
@@ -74,10 +80,30 @@ class Variante:
     # fábrica no lo lleva apuntado: sale del conjunto base, que es de donde
     # `build` lee por defecto.
     datos: str = config.VARIANTE_BASE
+    # Cuenta que lo entrenó. `None` es COMPARTIDO: lo es el base, y lo son los
+    # modelos que quedaron en disco antes de que hubiera cuentas. Un compartido
+    # lo ve todo el mundo, no lo borra nadie y no le cuenta cuota a nadie.
+    usuario: str | None = None
 
     @property
     def es_base(self) -> bool:
         return self.slug == config.VARIANTE_BASE
+
+    @property
+    def compartido(self) -> bool:
+        return self.usuario is None
+
+    def visible_para(self, usuario: str | None) -> bool:
+        return self.compartido or self.usuario == usuario
+
+    def borrable_por(self, usuario: str | None) -> bool:
+        """Solo su dueño, y nunca el base ni lo compartido.
+
+        Que lo compartido no se pueda borrar es la otra mitad de que se vea desde
+        todas las cuentas: si cualquiera pudiera borrarlo, «compartido» sería
+        «de todos para destruirlo».
+        """
+        return not self.es_base and not self.compartido and self.usuario == usuario
 
     @property
     def completo(self) -> bool:
@@ -121,9 +147,21 @@ class ClaveModelo:
         return self.variante == config.VARIANTE_BASE
 
     @property
+    def distancia(self) -> str:
+        """Geometría con la que se sirve. No es una elección por entidad."""
+        return config_similitud.DISTANCIA_SERVIBLE
+
+    @property
     def stem(self) -> str:
-        """Nombre (sin extensión) del artefacto dentro de la carpeta del modelo."""
-        return f"formulacion{self.formulacion}_{self.entidad}_{self.normalizacion}"
+        """Nombre (sin extensión) del artefacto dentro de la carpeta del modelo.
+
+        La regla la fija `src.similitud.modelo.stem_artefacto` y no se reescribe
+        aquí: es la que decide que la euclídea vaya SIN sufijo y las demás con él
+        (`..._mahalanobis`). Componerlo a mano funcionaba mientras se servía la
+        euclídea y dejó de funcionar en cuanto dejó de servirse.
+        """
+        return stem_artefacto(
+            self.formulacion, self.entidad, self.normalizacion, self.distancia)
 
     @property
     def etiqueta(self) -> str:
@@ -192,12 +230,12 @@ class Catalogo:
             return {}
         return datos if isinstance(datos, dict) else {}
 
-    def variantes(self) -> list[Variante]:
-        """Modelos declarados, el base primero y el resto por fecha de creación.
+    def todas_las_variantes(self) -> list[Variante]:
+        """TODO lo que hay en disco, sin filtrar por dueño.
 
-        Incluye los que todavía no tienen artefactos (reentrenamiento en curso o
-        fallido): quien quiera solo los servibles mira `entidades`, y para eso
-        está `disponibles()`.
+        De uso interno (contar cuota, comprobar que un nombre está libre, saber
+        si un slug existe para NO confirmárselo a quien no es su dueño). Ninguna
+        vista debe llamar a esto: para eso está `variantes(usuario)`.
         """
         salida = [Variante(
             slug=config.VARIANTE_BASE,
@@ -210,6 +248,7 @@ class Catalogo:
                 if not carpeta.is_dir():
                     continue
                 meta = self._leer_metadatos(carpeta)
+                dueno = meta.get("usuario")
                 nombradas.append(Variante(
                     slug=carpeta.name,
                     nombre=str(meta.get("nombre") or carpeta.name),
@@ -217,6 +256,10 @@ class Catalogo:
                     creado=meta.get("creado"),
                     origen=meta.get("origen"),
                     datos=str(meta.get("datos") or config.VARIANTE_BASE),
+                    # Sin campo `usuario` (modelos anteriores a las cuentas) el
+                    # modelo es compartido de solo lectura: adjudicárselo a
+                    # alguien seria inventarse un dueño.
+                    usuario=str(dueno) if dueno else None,
                 ))
             # Por fecha y, sin ella (metadatos ilegibles), por slug: el orden
             # tiene que ser estable entre peticiones o los desplegables bailan.
@@ -224,42 +267,71 @@ class Catalogo:
             salida += nombradas
         return salida
 
-    def variante(self, slug_pedido: str) -> Variante:
-        """El modelo de ese slug. `ModeloNoDisponible` si no existe."""
-        for v in self.variantes():
+    def variantes(self, usuario: str | None) -> list[Variante]:
+        """Modelos que esa cuenta puede ver: los suyos y los compartidos.
+
+        `usuario` es obligatorio y no tiene valor por defecto **a propósito**: un
+        default convierte «se me olvidó filtrar» en «se ve todo», que es
+        exactamente el fallo que esto viene a cerrar. Sin argumento, `TypeError`.
+        """
+        return [v for v in self.todas_las_variantes() if v.visible_para(usuario)]
+
+    def variante(self, slug_pedido: str, usuario: str | None) -> Variante:
+        """El modelo de ese slug, si esa cuenta puede verlo.
+
+        Un modelo de otro usuario da el MISMO error que uno inexistente: decir
+        «existe pero no es tuyo» ya confirma que existe y quién más usa la app.
+        """
+        for v in self.variantes(usuario):
             if v.slug == slug_pedido:
                 return v
         raise ModeloNoDisponible(f"No existe ningún modelo llamado {slug_pedido!r}.")
 
-    def disponibles(self) -> list[ClaveModelo]:
+    def disponibles(self, usuario: str | None) -> list[ClaveModelo]:
         """Artefactos presentes en disco (entidad x modelo), en orden estable."""
         return [
             ClaveModelo(entidad=entidad, variante=v.slug)
-            for v in self.variantes()
+            for v in self.variantes(usuario)
             for entidad in config.ENTIDADES
             if entidad in v.entidades
         ]
 
-    def entidades_disponibles(self) -> list[str]:
+    def entidades_disponibles(self, usuario: str | None) -> list[str]:
         """Tipos de entidad con al menos un modelo, en el orden de `config`."""
-        con_modelo = {c.entidad for c in self.disponibles()}
+        con_modelo = {c.entidad for c in self.disponibles(usuario)}
         return [e for e in config.ENTIDADES if e in con_modelo]
 
-    def opciones(self, entidad: str) -> list[ClaveModelo]:
+    def opciones(self, entidad: str, usuario: str | None) -> list[ClaveModelo]:
         """Modelos servibles para un tipo de entidad, el base primero."""
-        return [c for c in self.disponibles() if c.entidad == entidad]
+        return [c for c in self.disponibles(usuario) if c.entidad == entidad]
 
-    def opciones_de_variante(self, variante: str) -> list[ClaveModelo]:
+    def opciones_de_variante(self, variante: str,
+                             usuario: str | None) -> list[ClaveModelo]:
         """Artefactos servibles de un modelo concreto (0, 1 o 2)."""
-        return [c for c in self.disponibles() if c.variante == variante]
+        return [c for c in self.disponibles(usuario) if c.variante == variante]
 
-    def variantes_de(self, entidad: str) -> list[Variante]:
+    def variantes_de(self, entidad: str, usuario: str | None) -> list[Variante]:
         """Modelos que pueden responder por esa entidad (para el desplegable)."""
-        return [v for v in self.variantes() if entidad in v.entidades]
+        return [v for v in self.variantes(usuario) if entidad in v.entidades]
+
+    # --- Cuota ---------------------------------------------------------------
+
+    def propios(self, usuario: str | None) -> list[Variante]:
+        """Los que ha entrenado esa cuenta (los que le cuentan cuota)."""
+        return [v for v in self.todas_las_variantes() if v.usuario == usuario]
+
+    def cuota(self, usuario: str | None) -> tuple[int, int]:
+        """(cuántos tiene, cuántos puede tener) esa cuenta."""
+        return len(self.propios(usuario)), config.MAX_MODELOS_POR_USUARIO
+
+    def hay_hueco(self, usuario: str | None) -> bool:
+        usados, tope = self.cuota(usuario)
+        return usados < tope
 
     # --- Resolución ----------------------------------------------------------
 
-    def resolver(self, entidad: str, variante: str | None = None) -> ClaveModelo:
+    def resolver(self, entidad: str, usuario: str | None,
+                 variante: str | None = None) -> ClaveModelo:
         """Clave concreta a partir de una petición posiblemente incompleta.
 
         Lo único obligatorio es la entidad (es lo que pide el usuario: jugador o
@@ -267,10 +339,10 @@ class Catalogo:
         entidad, el primero que la cubra: la app tiene que seguir sirviendo
         aunque solo se haya construido una parte de los artefactos.
         """
-        candidatos = self.opciones(entidad)
+        candidatos = self.opciones(entidad, usuario)
         if not candidatos:
             raise ModeloNoDisponible(
-                f"No hay ningún modelo de '{entidad}' en {self.model_dir}. "
+                f"No hay ningún modelo de '{entidad}' disponible. "
                 f"Constrúyelos con: python -m src.similitud.build"
             )
         if variante is not None:
@@ -293,7 +365,7 @@ class Catalogo:
         sistema de ficheros pasarían por idénticas, algo irrelevante fuera de un
         test.
         """
-        npz = self._ruta(clave)
+        npz = self.ruta_artefacto(clave)
         if not npz.exists():
             raise ModeloNoDisponible(f"Falta el artefacto {npz}.")
         estado = npz.stat()
@@ -309,6 +381,7 @@ class Catalogo:
             clave.formulacion,
             clave.entidad,
             normalizacion=clave.normalizacion,
+            distancia=clave.distancia,
         )
         entrada = Cargado(
             modelo=modelo,
@@ -324,13 +397,20 @@ class Catalogo:
         """Solo el modelo de `clave` (atajo de `cargado`)."""
         return self.cargado(clave).modelo
 
-    def _ruta(self, clave: ClaveModelo) -> Path:
-        """Ruta del `.npz` de `clave`."""
+    def ruta_artefacto(self, clave: ClaveModelo) -> Path:
+        """Ruta del `.npz` de `clave`.
+
+        Pública porque hay dos cosas que se preguntan del artefacto SIN cargarlo
+        (su fecha en la página de datos, sus `entity_ids` para medir la
+        cobertura), y componer el nombre a mano en cada sitio duplicaría la regla
+        de `ClaveModelo.stem`.
+        """
         return self.dir_modelo(clave.variante) / f"{clave.stem}.npz"
 
     # --- Alta de un modelo nuevo ---------------------------------------------
 
-    def crear_variante(self, nombre: str, origen: str = config.VARIANTE_BASE,
+    def crear_variante(self, nombre: str, usuario: str | None,
+                       origen: str = config.VARIANTE_BASE,
                        datos: str = config.VARIANTE_BASE) -> Variante:
         """Reserva la carpeta de un modelo nuevo y escribe su `variante.json`.
 
@@ -344,9 +424,22 @@ class Catalogo:
         minutos por posición y los valores reales de las métricas salen de esa
         misma BD, y leerlos de otra dejaría sin contexto justo a las entidades
         que aporta el conjunto nuevo.
+
+        `usuario` queda apuntado como dueño. La cuota se comprueba ANTES de crear
+        la carpeta, para no dejar un directorio a medias por un límite que ya se
+        sabía. El nombre se contrasta contra TODOS los slugs del disco, no solo
+        contra los visibles: dos carpetas no pueden llamarse igual aunque sean de
+        cuentas distintas, y dejar que colisionen sería peor que decir que el
+        nombre está cogido.
         """
+        usados, tope = self.cuota(usuario)
+        if usados >= tope:
+            raise CuotaSuperada(
+                f"Has llegado al máximo de {tope} modelos. Borra alguno de los "
+                f"tuyos antes de entrenar otro."
+            )
         limpio, destino = preparar(
-            nombre, (v.slug for v in self.variantes()), "modelo")
+            nombre, (v.slug for v in self.todas_las_variantes()), "modelo")
         carpeta = self.dir_variantes / destino
         carpeta.mkdir(parents=True)
         variante = Variante(
@@ -355,12 +448,13 @@ class Catalogo:
             creado=datetime.now().isoformat(timespec="seconds"),
             origen=origen,
             datos=datos,
+            usuario=usuario,
         )
         (carpeta / config.FICHERO_VARIANTE).write_text(
             json.dumps(
                 {"nombre": variante.nombre, "slug": variante.slug,
                  "creado": variante.creado, "origen": variante.origen,
-                 "datos": variante.datos},
+                 "datos": variante.datos, "usuario": variante.usuario},
                 ensure_ascii=False, indent=2,
             ),
             encoding="utf-8",
@@ -372,3 +466,26 @@ class Catalogo:
         if slug_pedido == config.VARIANTE_BASE:
             raise ValueError("el modelo base no se descarta")
         shutil.rmtree(self.dir_variantes / slug_pedido, ignore_errors=True)
+
+    def borrar_variante(self, slug_pedido: str, usuario: str | None) -> Variante:
+        """Borra un modelo del usuario, con sus artefactos. Devuelve el borrado.
+
+        Sin borrado no hay cuota que valga: un tope de 3 sin forma de liberar
+        sitio es un tope de 3 modelos por cuenta y para siempre.
+
+        Un modelo que no sea suyo (o el base, o uno compartido) da
+        `ModeloNoDisponible`, el mismo error que uno inexistente: quien no puede
+        verlo tampoco tiene por qué enterarse de que está ahí.
+        """
+        objetivo = next(
+            (v for v in self.todas_las_variantes() if v.slug == slug_pedido), None)
+        if objetivo is None or not objetivo.borrable_por(usuario):
+            raise ModeloNoDisponible(
+                f"No existe ningún modelo llamado {slug_pedido!r}.")
+        shutil.rmtree(self.dir_variantes / objetivo.slug)
+        with self._lock:
+            # La caché va por (entidad, modelo): si no se limpia, el modelo
+            # borrado se seguiría sirviendo desde memoria hasta reiniciar.
+            for clave in [c for c in self._cache if c.variante == objetivo.slug]:
+                del self._cache[clave]
+        return objetivo

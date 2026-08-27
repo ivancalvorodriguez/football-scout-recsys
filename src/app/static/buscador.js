@@ -16,6 +16,7 @@
   var lista = formulario.querySelector("#sugerencias");
   var selectorEntidad = formulario.querySelector("#entidad");
   var selectorModelo = formulario.querySelector("#modelo");
+  var selectorDatos = formulario.querySelector("#datos");
   var apiSugerencias = formulario.dataset.apiSugerencias;
 
   // Al cambiar jugador/equipo cambian los modelos disponibles y el universo de
@@ -28,6 +29,12 @@
         "?entidad=" + encodeURIComponent(selectorEntidad.value);
       if (selectorModelo && selectorModelo.value) {
         destino += "&modelo=" + encodeURIComponent(selectorModelo.value);
+      }
+      // La base de datos elegida también se arrastra: decide qué entidades
+      // existen, y perderla al cambiar de jugador a equipo devolvería
+      // silenciosamente a la de fábrica.
+      if (selectorDatos && selectorDatos.value) {
+        destino += "&datos=" + encodeURIComponent(selectorDatos.value);
       }
       window.location = destino;
     });
@@ -48,6 +55,7 @@
     p.set("entidad", selectorEntidad ? selectorEntidad.value : "");
     p.set("q", texto);
     if (selectorModelo && selectorModelo.value) p.set("modelo", selectorModelo.value);
+    if (selectorDatos && selectorDatos.value) p.set("datos", selectorDatos.value);
     return p;
   }
 
@@ -66,6 +74,16 @@
       nombre.className = "sugerencia-nombre";
       nombre.textContent = s.nombre;
       boton.appendChild(nombre);
+      // Está en la base de datos pero no en el modelo: se puede consultar, y la
+      // respuesta se calculará colocándola en él. Se marca aquí para que la
+      // diferencia se vea ANTES de elegir, no solo en los resultados.
+      if (s.en_modelo === false) {
+        var marca = document.createElement("span");
+        marca.className = "marca-proyectada";
+        marca.textContent = "fuera del modelo";
+        marca.title = "No está en el modelo: se coloca en él al consultarla";
+        boton.appendChild(marca);
+      }
       // Equipo y liga desambiguan homónimos (hay varios "Garcia" en el dataset).
       // `contexto` es la trayectoria ya compuesta ("Barcelona (La Liga
       // 2015/2016)"); solo viene en jugadores y solo si hay base de datos, así
@@ -79,11 +97,16 @@
         boton.appendChild(ligas);
       }
       // El id fija la identidad: dos entidades pueden compartir nombre.
+      //
+      // Elegir una sugerencia RELLENA el campo, no busca: la lista es un
+      // autocompletado, y buscar sola al tocarla se lleva por delante el resto
+      // del formulario (el top-k, el modelo) sin dar ocasion de ajustarlo. La
+      // busqueda la lanza siempre el boton.
       boton.addEventListener("click", function () {
         entrada.value = s.nombre;
         oculto.value = s.id;
         ocultar();
-        formulario.submit();
+        entrada.focus();
       });
       li.appendChild(boton);
       lista.appendChild(li);

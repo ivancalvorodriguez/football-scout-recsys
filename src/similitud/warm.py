@@ -36,8 +36,10 @@ from pathlib import Path
 
 import numpy as np
 
-from . import config
+from . import config, distancias
+from .distancias import Espacio
 from .features import MatrizFeatures
+from .modelo import stem_artefacto
 
 # Sufijo del fichero de estado, junto al artefacto servible.
 SUFIJO_ESTADO = ".warm.npz"
@@ -58,10 +60,15 @@ def hiper_features() -> dict:
 
 
 def ruta_estado(
-    model_dir: Path, formulacion: str, entidad: str, normalizacion: str
+    model_dir: Path, formulacion: str, entidad: str, normalizacion: str,
+    distancia: str = distancias.POR_DEFECTO,
 ) -> Path:
-    """Ruta del estado warm de un modelo (misma convencion que `modelo.guardar`)."""
-    stem = f"formulacion{formulacion}_{entidad}_{normalizacion}"
+    """Ruta del estado warm de un modelo (misma convencion que `modelo.guardar`).
+
+    El nombre lo fija `modelo.stem_artefacto`, que es quien manda: el estado
+    warm siempre va al lado de su artefacto y con su mismo nombre.
+    """
+    stem = stem_artefacto(formulacion, entidad, normalizacion, distancia)
     return Path(model_dir) / f"{stem}{SUFIJO_ESTADO}"
 
 
@@ -100,6 +107,15 @@ class EstadoWarm:
     obs_hash: np.ndarray              # (M,) uint64
     entity_ids: np.ndarray            # (P,) ordenados, como en el modelo
 
+    # Distancia con la que se ajusto y lo que esa distancia aprendio de los datos
+    # (hoy solo el blanqueo de mahalanobis). Se guarda por el mismo motivo que
+    # `sigma`: proyectar o reentrenar con una geometria REESTIMADA pondria a las
+    # entidades nuevas en otro espacio que las del modelo. Un estado escrito
+    # antes de que la distancia fuera un parametro se relee como `euclidea`, que
+    # es la que tenia.
+    distancia: str = distancias.POR_DEFECTO
+    espacio_L: np.ndarray | None = None
+
     # Formulacion 2: W dispersa por columnas, en formato CSC.
     w_ptr: np.ndarray | None = None   # (M+1,) inicio de cada columna en w_idx
     w_idx: np.ndarray | None = None   # (nnz,) fila r con peso
@@ -116,6 +132,14 @@ class EstadoWarm:
     @property
     def n_entidades(self) -> int:
         return int(self.entity_ids.shape[0])
+
+    def espacio(self) -> Espacio:
+        """La geometria del ajuste, lista para volver a usarla tal cual.
+
+        Es lo que consumen el reentrenamiento (para no reestimar el blanqueo con
+        los datos ampliados) y `foldin` (para proyectar en el mismo espacio).
+        """
+        return Espacio(self.distancia, L=self.espacio_L)
 
     def columna(self, s: int) -> tuple[np.ndarray, np.ndarray]:
         """(indices, valores) de la columna s de W. Vacias si no hay W guardada."""
@@ -134,7 +158,7 @@ class EstadoWarm:
             "obs_hash": self.obs_hash,
             "entity_ids": self.entity_ids,
         }
-        for nombre in ("w_ptr", "w_idx", "w_val", "costos"):
+        for nombre in ("w_ptr", "w_idx", "w_val", "costos", "espacio_L"):
             valor = getattr(self, nombre)
             if valor is not None:
                 arrays[nombre] = valor
@@ -146,6 +170,7 @@ class EstadoWarm:
                 "feat_names": list(self.feat_names),
                 "hiper": self.hiper,
                 "sigma": self.sigma,
+                "distancia": self.distancia,
             }, ensure_ascii=False).encode("utf-8"),
             dtype=np.uint8,
         )
@@ -172,6 +197,10 @@ class EstadoWarm:
             w_val=opcional("w_val"),
             sigma=meta.get("sigma"),
             costos=opcional("costos"),
+            # Un estado anterior a que la distancia fuera un parametro no lo
+            # declara: era euclidea, que es lo unico que habia.
+            distancia=str(meta.get("distancia") or distancias.POR_DEFECTO),
+            espacio_L=opcional("espacio_L"),
         )
 
 
@@ -191,10 +220,16 @@ def identidad_observaciones(mf: MatrizFeatures) -> tuple[np.ndarray, np.ndarray]
 
 def estado_base(
     mf: MatrizFeatures, formulacion: str, entidad: str, normalizacion: str,
-    entity_ids: np.ndarray, hiper: dict,
+    entity_ids: np.ndarray, hiper: dict, espacio: Espacio | None = None,
 ) -> EstadoWarm:
-    """Estado con la parte comun (identidad de filas); las formulaciones anaden lo suyo."""
+    """Estado con la parte comun (identidad de filas); las formulaciones anaden lo suyo.
+
+    ``espacio`` es la geometria del ajuste (`src.similitud.distancias`): se
+    guarda entera —nombre y, si lo tiene, el blanqueo— para que el siguiente
+    ajuste y las proyecciones la reutilicen en vez de reestimarla.
+    """
     obs_entity, obs_match = identidad_observaciones(mf)
+    esp = espacio if espacio is not None else Espacio(distancias.POR_DEFECTO)
     return EstadoWarm(
         formulacion=formulacion,
         entidad=entidad,
@@ -205,6 +240,8 @@ def estado_base(
         obs_match=obs_match,
         obs_hash=huellas_filas(mf.X),
         entity_ids=np.asarray(entity_ids),
+        distancia=esp.nombre,
+        espacio_L=esp.L,
     )
 
 
@@ -259,15 +296,26 @@ def _sin_reutilizacion(n_obs: int, n_ent: int, motivo: str) -> Emparejamiento:
     )
 
 
-def compatible(estado: EstadoWarm, mf: MatrizFeatures, hiper: dict) -> str:
+def compatible(
+    estado: EstadoWarm, mf: MatrizFeatures, hiper: dict,
+    distancia: str | None = None,
+) -> str:
     """Motivo por el que el estado NO sirve, o cadena vacia si sirve.
 
-    Se exige el mismo vector de features y los mismos hiperparametros: con otros,
-    el optimo es otro y arrancar del anterior seria arrancar de la solucion de un
-    problema distinto (valido pero sin sentido, y enganoso al informar del ahorro).
+    Se exige el mismo vector de features, la misma DISTANCIA y los mismos
+    hiperparametros: con otros, el optimo es otro y arrancar del anterior seria
+    arrancar de la solucion de un problema distinto (valido pero sin sentido, y
+    enganoso al informar del ahorro).
+
+    La distancia esta ademas en el nombre del fichero, asi que en la practica no
+    se pueden confundir dos estados; se comprueba igual porque nada impide pasar
+    un `EstadoWarm` cargado a mano y porque el fallo seria silencioso.
     """
     if list(estado.feat_names) != list(mf.feat_names):
         return "el vector de features ha cambiado (otras columnas o en otro orden)"
+    if distancia is not None and estado.distancia != distancias.validar(distancia):
+        return (f"el ajuste anterior media con la distancia {estado.distancia!r} "
+                f"y ahora se pide {distancia!r}")
     distintos = [
         k for k in set(estado.hiper) | set(hiper)
         if estado.hiper.get(k) != hiper.get(k)
@@ -282,6 +330,7 @@ def emparejar(
     mf: MatrizFeatures,
     entity_ids: np.ndarray,
     hiper: dict,
+    distancia: str | None = None,
 ) -> Emparejamiento:
     """Cruza el estado previo con los datos actuales.
 
@@ -294,7 +343,7 @@ def emparejar(
     n_obs, n_ent = mf.X.shape[0], len(entity_ids)
     if estado is None:
         return _sin_reutilizacion(n_obs, n_ent, "no hay estado previo")
-    motivo = compatible(estado, mf, hiper)
+    motivo = compatible(estado, mf, hiper, distancia=distancia)
     if motivo:
         return _sin_reutilizacion(n_obs, n_ent, motivo)
 

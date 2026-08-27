@@ -417,18 +417,35 @@ def leer_metricas(out_dir: Path) -> pd.DataFrame:
     return _tipos(df)
 
 
+# Distancia que se asume en una tabla escrita antes de que la geometria fuera un
+# eje: era la unica que habia. Se rellena al leer, ademas de estar migrada en
+# disco (`src.evaluacion.migrar_distancia`), para que una carpeta que no se haya
+# migrado no rompa las tablas ni las figuras.
+DISTANCIA_HISTORICA = "euclidea"
+
+
 def _tipos(df: pd.DataFrame) -> pd.DataFrame:
     """Homogeneiza los tipos de las columnas clave.
 
     `formulacion` y `fase` viajan como texto ("2", "5", "0") pero `read_csv` los
     devuelve como enteros: sin esto, las filas leidas de disco y las recien
     calculadas no se reconocerian como la misma celda al fundirlas.
+
+    Rellena ademas `distancia` y la reintroduce en `modelo` cuando la tabla es
+    anterior a que la distancia fuera un eje (ver `DISTANCIA_HISTORICA`): sin eso,
+    las filas viejas y las nuevas de la MISMA configuracion tendrian etiquetas
+    distintas y se acumularian como dos modelos en vez de fundirse.
     """
     if df.empty:
         return df
     df = df.copy()
+    if "distancia" not in df.columns:
+        df["distancia"] = DISTANCIA_HISTORICA
+        if "modelo" in df.columns:
+            df["modelo"] = df["modelo"].astype(str) + f"_{DISTANCIA_HISTORICA}"
+    df["distancia"] = df["distancia"].fillna(DISTANCIA_HISTORICA)
     for col in ("combinacion", "modelo", "formulacion", "entidad",
-                "normalizacion", "fase", "metrica"):
+                "normalizacion", "distancia", "fase", "metrica"):
         if col in df.columns:
             df[col] = df[col].astype(str)
     if "valor" in df.columns:

@@ -36,6 +36,10 @@ class ConjuntoNoDisponible(LookupError):
     """No existe el conjunto de datos pedido."""
 
 
+class CuotaSuperada(RuntimeError):
+    """La cuenta ya tiene tantos conjuntos de datos como se le permiten."""
+
+
 @dataclass(frozen=True)
 class Conjunto:
     """Un conjunto de datos con nombre y dónde vive su BD."""
@@ -46,10 +50,24 @@ class Conjunto:
     creado: str | None = None
     origen: str | None = None
     paquete: str | None = None
+    # Cuenta que lo creó. Mismas reglas que en `catalogo.Variante`: `None` es
+    # compartido (el base, y lo que existiera antes de haber cuentas), se ve
+    # desde todas las cuentas, no lo borra nadie y no cuenta cuota.
+    usuario: str | None = None
 
     @property
     def es_base(self) -> bool:
         return self.slug == config.VARIANTE_BASE
+
+    @property
+    def compartido(self) -> bool:
+        return self.usuario is None
+
+    def visible_para(self, usuario: str | None) -> bool:
+        return self.compartido or self.usuario == usuario
+
+    def borrable_por(self, usuario: str | None) -> bool:
+        return not self.es_base and not self.compartido and self.usuario == usuario
 
     @property
     def existe(self) -> bool:
@@ -109,11 +127,12 @@ class CatalogoDatos:
             return {}
         return datos if isinstance(datos, dict) else {}
 
-    def conjuntos(self) -> list[Conjunto]:
-        """Los conjuntos declarados, el base primero y el resto por fecha.
+    def todos_los_conjuntos(self) -> list[Conjunto]:
+        """TODO lo que hay en disco, sin filtrar por dueño.
 
-        El base se lista siempre, exista o no su fichero: es el destino de
-        `src.extraccion.extract` y el punto de partida de todo lo demás.
+        De uso interno, igual que `Catalogo.todas_las_variantes`: contar cuota,
+        comprobar nombres libres y resolver la BD que apunta un modelo. Las
+        vistas usan `conjuntos(usuario)`.
         """
         salida = [Conjunto(
             slug=config.VARIANTE_BASE,
@@ -126,6 +145,7 @@ class CatalogoDatos:
                 if not carpeta.is_dir():
                     continue
                 meta = self._metadatos(carpeta)
+                dueno = meta.get("usuario")
                 nombrados.append(Conjunto(
                     slug=carpeta.name,
                     nombre=str(meta.get("nombre") or carpeta.name),
@@ -133,18 +153,27 @@ class CatalogoDatos:
                     creado=meta.get("creado"),
                     origen=meta.get("origen"),
                     paquete=meta.get("paquete"),
+                    usuario=str(dueno) if dueno else None,
                 ))
             nombrados.sort(key=lambda c: (c.creado or "", c.slug))
             salida += nombrados
         return salida
 
-    def disponibles(self) -> list[Conjunto]:
-        """Solo los que tienen BD: los que se pueden consultar o ampliar."""
-        return [c for c in self.conjuntos() if c.existe]
+    def conjuntos(self, usuario: str | None) -> list[Conjunto]:
+        """Los que esa cuenta puede ver: los suyos y los compartidos.
 
-    def conjunto(self, slug_pedido: str) -> Conjunto:
-        """El conjunto de ese slug. `ConjuntoNoDisponible` si no existe."""
-        for c in self.conjuntos():
+        Sin valor por defecto, por el mismo motivo que en `catalogo`: olvidarse
+        de filtrar tiene que ser un `TypeError`, no una fuga silenciosa.
+        """
+        return [c for c in self.todos_los_conjuntos() if c.visible_para(usuario)]
+
+    def disponibles(self, usuario: str | None) -> list[Conjunto]:
+        """Solo los que tienen BD: los que se pueden consultar o ampliar."""
+        return [c for c in self.conjuntos(usuario) if c.existe]
+
+    def conjunto(self, slug_pedido: str, usuario: str | None) -> Conjunto:
+        """El conjunto de ese slug, si esa cuenta puede verlo."""
+        for c in self.conjuntos(usuario):
             if c.slug == slug_pedido:
                 return c
         raise ConjuntoNoDisponible(
@@ -158,16 +187,37 @@ class CatalogoDatos:
         lo pide un MODELO, que apunta al conjunto con el que se entrenó. Si esa
         carpeta ya no está, se sirve igual con los adornos del base —perderá
         algún nombre de equipo— en vez de dejar de servir el modelo entero.
+
+        **No filtra por dueño y no debe hacerlo**: no es una respuesta a nadie,
+        es la traducción de «este modelo se entrenó con estos datos» a una ruta
+        de fichero. El control de quién ve qué está un paso antes, en el modelo:
+        si el usuario no puede ver el modelo, nunca se llega aquí.
         """
+        conjuntos = self.todos_los_conjuntos()
         if slug_pedido:
-            for c in self.conjuntos():
+            for c in conjuntos:
                 if c.slug == slug_pedido:
                     return c
-        return self.conjuntos()[0]
+        return conjuntos[0]
+
+    # --- Cuota ---------------------------------------------------------------
+
+    def propios(self, usuario: str | None) -> list[Conjunto]:
+        """Los que ha creado esa cuenta (los que le cuentan cuota)."""
+        return [c for c in self.todos_los_conjuntos() if c.usuario == usuario]
+
+    def cuota(self, usuario: str | None) -> tuple[int, int]:
+        """(cuántos tiene, cuántos puede tener) esa cuenta."""
+        return len(self.propios(usuario)), config.MAX_DATASETS_POR_USUARIO
+
+    def hay_hueco(self, usuario: str | None) -> bool:
+        usados, tope = self.cuota(usuario)
+        return usados < tope
 
     # --- Alta de un conjunto nuevo -------------------------------------------
 
-    def crear(self, nombre: str, origen: str = config.VARIANTE_BASE,
+    def crear(self, nombre: str, usuario: str | None,
+              origen: str = config.VARIANTE_BASE,
               paquete: str | None = None) -> Conjunto:
         """Reserva la carpeta de un conjunto nuevo con una COPIA del de origen.
 
@@ -175,10 +225,20 @@ class CatalogoDatos:
         escribe solo sobre ella (por eso se lanza con `--sin-copia`) y el
         conjunto del que se partió queda intacto, con sus modelos todavía
         válidos.
+
+        Cada copia es una BD entera (12 MB con las cinco ligas de fábrica), así
+        que la cuota se mira ANTES de copiar: comprobarla después habría gastado
+        ya el disco que el tope pretende ahorrar.
         """
+        usados, tope = self.cuota(usuario)
+        if usados >= tope:
+            raise CuotaSuperada(
+                f"Has llegado al máximo de {tope} conjuntos de datos. Borra "
+                f"alguno de los tuyos antes de crear otro."
+            )
         limpio, destino = preparar(
-            nombre, (c.slug for c in self.conjuntos()), "conjunto de datos")
-        fuente = self.conjunto(origen)
+            nombre, (c.slug for c in self.todos_los_conjuntos()), "conjunto de datos")
+        fuente = self.conjunto(origen, usuario)
         if not fuente.existe:
             raise NombreInvalido(
                 f"El conjunto «{fuente.nombre}» todavía no tiene base de datos: "
@@ -199,12 +259,13 @@ class CatalogoDatos:
             creado=datetime.now().isoformat(timespec="seconds"),
             origen=origen,
             paquete=paquete,
+            usuario=usuario,
         )
         (carpeta / config.FICHERO_CONJUNTO).write_text(
             json.dumps(
                 {"nombre": conjunto.nombre, "slug": conjunto.slug,
                  "creado": conjunto.creado, "origen": conjunto.origen,
-                 "paquete": conjunto.paquete},
+                 "paquete": conjunto.paquete, "usuario": conjunto.usuario},
                 ensure_ascii=False, indent=2,
             ),
             encoding="utf-8",
@@ -220,3 +281,20 @@ class CatalogoDatos:
         if slug_pedido == config.VARIANTE_BASE:
             raise ValueError("el conjunto base no se descarta")
         shutil.rmtree(self.dir_conjuntos / slug_pedido, ignore_errors=True)
+
+    def borrar(self, slug_pedido: str, usuario: str | None) -> Conjunto:
+        """Borra un conjunto del usuario. Devuelve el borrado.
+
+        Igual que en `catalogo`: lo que no es suyo da el mismo error que lo que
+        no existe. Los modelos que apuntaban a este conjunto NO se borran —son
+        otra cosa, con su propia cuota— y siguen sirviéndose; lo que pierden es
+        el contexto de la BD (equipo, posiciones, valores reales), porque
+        `resolver` cae al conjunto base cuando el suyo ya no está.
+        """
+        objetivo = next(
+            (c for c in self.todos_los_conjuntos() if c.slug == slug_pedido), None)
+        if objetivo is None or not objetivo.borrable_por(usuario):
+            raise ConjuntoNoDisponible(
+                f"No existe ningún conjunto de datos llamado {slug_pedido!r}.")
+        shutil.rmtree(self.dir_conjuntos / objetivo.slug)
+        return objetivo

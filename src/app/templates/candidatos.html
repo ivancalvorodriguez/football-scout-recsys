@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_enlaces.html" import url_ficha %}
+{% from "_enlaces.html" import url_ficha with context %}
 {% from "_contexto.html" import contexto_entidad %}
 
 {% block titulo %}«{{ consulta }}» · Scouting por similitud{% endblock %}
@@ -21,12 +21,19 @@
         {% for c in candidatos %}
           <li>
             <a href="{{ url_for('web.similares', entidad=entidad, id=c.id,
-                                formulacion=clave.formulacion if clave else none,
-                                normalizacion=clave.normalizacion if clave else none,
+                                modelo=clave.variante if clave else none,
+                                datos=conjunto.slug if conjunto else none,
                                 k=k) }}">
               {{ c.nombre }}
             </a>
             <span class="apunte">
+              {# Las que solo están en la base de datos se pueden consultar
+                 igual, pero conviene saber cuáles son antes de pinchar: su
+                 respuesta se calcula colocándolas en el modelo. #}
+              {% if not c.en_modelo %}
+                · <span class="marca-proyectada" title="No está en el modelo: se
+                  coloca en él al consultarla">fuera del modelo</span>
+              {% endif %}
               · {{ contexto_entidad(entidad, c) }}
               · <a href="{{ url_ficha(entidad, c.id, clave) }}">ficha</a>
             </span>

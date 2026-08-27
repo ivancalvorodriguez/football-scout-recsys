@@ -37,6 +37,7 @@ import re
 from pathlib import Path
 
 from src.similitud import config as scfg
+from src.similitud import distancias
 
 SUFIJO = ".huella.json"
 
@@ -71,13 +72,34 @@ _POR_FORMULACION: dict[str, tuple[str, ...]] = {
 # El metodo distribucional de la F5 se elige por entidad (formulacion5.py:37).
 _METODO_F5 = {"jugador": "F5_METODO_JUGADOR", "equipo": "F5_METODO_EQUIPO"}
 
-# Atributos que NO influyen en el artefacto: rutas por defecto, parametros de
-# consulta, el catalogo del que ya se deriva POSITION_FEATURES y la eleccion de
-# que combinacion SIRVE la app (MODELOS_SERVIBLES), que no entra en el ajuste:
-# selecciona entre artefactos ya construidos, cada uno con su propia huella.
+# Atributos que NO influyen en el artefacto QUE CONSTRUYE EL BARRIDO: rutas por
+# defecto, parametros de consulta, el catalogo del que ya se deriva
+# POSITION_FEATURES y las dos tablas que describen lo que SIRVE la app.
+#
+# `MODELOS_SERVIBLES` no entra en ningun ajuste: selecciona entre artefactos ya
+# construidos, cada uno con su propia huella.
+#
+# `HIPERPARAMETROS_SERVIBLES` si cambia un ajuste, pero solo el de `build` y el
+# de `src.incremental.reentrenar`, que son los que lo aplican (ver
+# `similitud.config.hiperparametros_servibles`) y no llevan huella. El barrido
+# nunca pasa por ahi: construye con `evaluacion.construccion`, donde cada
+# combinacion fija sus propios valores y esos SI estan en la huella, uno a uno,
+# via `_POR_FORMULACION`. Meterlo aqui como si fuera un hiperparametro mas
+# invalidaria la rejilla acumulada cada vez que se promociona un modelo nuevo.
+#
+# `DISTANCIA_SERVIBLE` esta aqui por lo mismo que `MODELOS_SERVIBLES`: no entra
+# en ningun ajuste, solo dice cual de los artefactos ya construidos sirve la app.
+# La distancia con la que SE AJUSTA una celda no es un hiperparametro de
+# `config`: es parte de la identidad de la celda, y va en `celda` (ver `calcular`).
+#
+# Y por eso este modulo NO lo usa como valor por defecto en ningun sitio: lo que
+# falta cuando una huella o una meta antigua no declara distancia es la geometria
+# HISTORICA (`distancias.POR_DEFECTO`, la euclidea, la unica que habia entonces),
+# que desde el 25-8-2026 ya no es la que sirve la app. Confundirlos releeria toda
+# la rejilla acumulada como si fuera mahalanobis.
 _IRRELEVANTES = frozenset({
     "DEFAULT_DB_PATH", "DEFAULT_MODEL_DIR", "DEFAULT_TOP_K", "POSITIONS_25",
-    "MODELOS_SERVIBLES",
+    "MODELOS_SERVIBLES", "HIPERPARAMETROS_SERVIBLES", "DISTANCIA_SERVIBLE",
 })
 
 # --------------------------------------------------------------------------- #
@@ -89,7 +111,12 @@ _IRRELEVANTES = frozenset({
 # nada: lo llaman las dos formulaciones, y si un cambio ahi hiciera que se diera
 # por reutilizable algo que no lo es, la S cambiaria. Preferimos invalidar la
 # cache de mas a servir un modelo construido con otro codigo.
-_CODIGO_COMUN = ("features.py", "data.py", "modelo.py", "warm.py")
+#
+# `distancias.py` entra en las dos formulaciones: define la geometria (y las
+# constantes que la afinan, como el piso del blanqueo o las pasadas de IRLS), asi
+# que tocarlo cambia cualquier artefacto que no sea euclideo — y hasta el
+# euclideo si se toca la funcion que todos comparten.
+_CODIGO_COMUN = ("features.py", "data.py", "modelo.py", "warm.py", "distancias.py")
 _CODIGO_POR_FORMULACION: dict[str, tuple[str, ...]] = {
     # formulacion5 usa `slim` para el EASE, asi que slim.py entra en las dos.
     "2": ("formulacion2.py", "slim.py"),
@@ -197,11 +224,24 @@ def procedencia(db_path: Path) -> dict:
     }
 
 
-def calcular(formulacion: str, entidad: str, normalizacion: str, db_path: Path) -> dict:
+def calcular(formulacion: str, entidad: str, normalizacion: str, db_path: Path,
+             excluir_ligas: tuple[str, ...] = (),
+             distancia: str = distancias.POR_DEFECTO) -> dict:
     """Huella de la celda con la configuracion VIGENTE en `src.similitud.config`.
 
     Se llama dentro del `_config_temporal` de la combinacion, asi que recoge sus
     valores.
+
+    ``excluir_ligas`` forma parte de la huella y no es un adorno: un artefacto
+    ajustado sin una liga cubre OTRO universo de entidades que el mismo ajuste con
+    ella. Sin esto, dos ejecuciones sobre la misma carpeta —una con hold-out y
+    otra sin el— se reutilizarian mutuamente la cache y las metricas describirian
+    un modelo que no es el que dicen.
+
+    ``distancia`` va en la CELDA y no en los hiperparametros: no es un valor que
+    se afine dentro de un modelo, es que modelo es. Dos celdas que solo difieren
+    en ella son artefactos distintos, con nombre distinto en disco y fila propia
+    en las tablas — exactamente igual que la normalizacion.
     """
     _comprobar_cobertura()
     h = {
@@ -210,11 +250,13 @@ def calcular(formulacion: str, entidad: str, normalizacion: str, db_path: Path) 
             "formulacion": formulacion,
             "entidad": entidad,
             "normalizacion": normalizacion,
+            "distancia": distancia,
         },
         "hiperparametros": {
             attr: getattr(scfg, attr) for attr in alcance(formulacion, entidad)
         },
         "datos": _huella_datos(db_path),
+        "excluir_ligas": sorted(excluir_ligas),
         "codigo": _hash_codigo(formulacion),
     }
     # Se devuelve ya en forma canonica JSON: varios hiperparametros son tuplas
@@ -288,6 +330,19 @@ def hiperparametros_iguales(guardada: dict, pedida: dict) -> bool:
     return all(a[attr] == b[attr] for attr in b)
 
 
+def _celda(h: dict | None) -> dict:
+    """La celda de una huella, con la distancia rellenada si no la declara.
+
+    Una huella escrita antes de que la distancia fuera parte de la identidad no
+    la trae, y era `euclidea` (la unica que habia). Sin esta lectura, cada
+    artefacto de las carpetas de barrido ya existentes contaria como «otra
+    celda» y se reconstruiria aunque nada hubiera cambiado.
+    """
+    celda = dict((h or {}).get("celda") or {})
+    celda.setdefault("distancia", distancias.POR_DEFECTO)
+    return celda
+
+
 def coincide(model_dir: Path, stem: str, h: dict) -> bool:
     """El artefacto guardado se construyo con exactamente esta huella.
 
@@ -302,7 +357,7 @@ def coincide(model_dir: Path, stem: str, h: dict) -> bool:
         return False
     return (
         guardada.get("version") == h["version"]
-        and guardada.get("celda") == h["celda"]
+        and _celda(guardada) == _celda(h)
         and hiperparametros_iguales(guardada, h)
         and guardada.get("datos") == h["datos"]
         and guardada.get("codigo") == h["codigo"]
@@ -358,8 +413,12 @@ def adoptar(model_dir: Path, stem: str, entidad: str, h: dict) -> bool:
         return False
 
     meta = guardado.get("meta", {})
-    celda = h["celda"]
+    celda = _celda(h)
     if meta.get("normalizacion") != celda["normalizacion"]:
+        return False
+    # Un artefacto sin `distancia` en su meta es euclideo (es lo unico que se
+    # construia entonces), asi que solo se adopta como euclideo.
+    if (meta.get("distancia") or distancias.POR_DEFECTO) != celda["distancia"]:
         return False
     if guardado.get("formulacion") != celda["formulacion"]:
         return False

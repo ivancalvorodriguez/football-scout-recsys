@@ -1,8 +1,32 @@
-.env/
-docs/
-open-data/
-__pycache__/
+# Salida generada (barridos, BD, historicos): no entra en el repositorio.
+# Unica excepcion: los artefactos SERVIDOS por la app en `outputs/modelo/`
+# (uno por entidad, con su estado warm, su huella y el linaje de produccion).
+# Se listan uno a uno a proposito: cualquier otra cosa que aparezca ahi
+# —variantes reentrenadas desde la interfaz, pruebas— sigue ignorada.
+outputs/*
+!outputs/modelo/
+outputs/modelo/*
+!outputs/modelo/produccion.json
+!outputs/modelo/formulacion5_jugador_por_liga_manhattan.json
+!outputs/modelo/formulacion5_jugador_por_liga_manhattan.huella.json
+!outputs/modelo/formulacion5_jugador_por_liga_manhattan.npz
+!outputs/modelo/formulacion5_jugador_por_liga_manhattan.warm.npz
+!outputs/modelo/formulacion5_equipo_global_manhattan.json
+!outputs/modelo/formulacion5_equipo_global_manhattan.huella.json
+!outputs/modelo/formulacion5_equipo_global_manhattan.npz
+!outputs/modelo/formulacion5_equipo_global_manhattan.warm.npz
 
+# La BD SERVIDA (la que la app abre en lectura para nombres de liga, equipo y
+# reparto de minutos, y el universo sobre el que se ajustaron los artefactos de
+# arriba). Igual que con el modelo, se nombra el fichero y nada mas: la BD de
+# entrenamiento, la de prueba y los conjuntos de usuario en `outputs/db/conjuntos/`
+# siguen fuera.
+!outputs/db/
+outputs/db/*
+!outputs/db/scouting.db
+open-data/
+.env/
+.claude/
 .dev/
 
 __pycache__/

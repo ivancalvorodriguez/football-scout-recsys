@@ -21,9 +21,11 @@ from pathlib import Path
 
 from flask import g
 
+from .cobertura import CatalogoUniverso
 from .contexto import CatalogoContexto
 from .crudos import CatalogoCrudos
 from .ligas import CatalogoLigas
+from .proyeccion import CatalogoProyeccion
 
 # Clave en `flask.g` de la BD de la petición en curso.
 _CLAVE = "_fuente_bd"
@@ -42,6 +44,8 @@ class Fuentes:
         self._ligas: dict[str, CatalogoLigas] = {}
         self._contexto: dict[str, CatalogoContexto] = {}
         self._crudos: dict[str, CatalogoCrudos] = {}
+        self._universo: dict[str, CatalogoUniverso] = {}
+        self._proyeccion: dict[str, CatalogoProyeccion] = {}
         self._lock = threading.Lock()
 
     def actual(self) -> Path:
@@ -74,3 +78,11 @@ class Fuentes:
 
     def crudos(self, db_path: Path | None = None) -> CatalogoCrudos:
         return self._obtener(self._crudos, CatalogoCrudos, db_path)
+
+    def universo(self, db_path: Path | None = None) -> CatalogoUniverso:
+        """Qué entidades tiene la BD (para contrastarlas con las del modelo)."""
+        return self._obtener(self._universo, CatalogoUniverso, db_path)
+
+    def proyeccion(self, db_path: Path | None = None) -> CatalogoProyeccion:
+        """Cómo colocar en un modelo a las entidades que solo tiene la BD."""
+        return self._obtener(self._proyeccion, CatalogoProyeccion, db_path)

@@ -183,6 +183,46 @@ code, pre { font-family: "Cascadia Mono", Consolas, "Courier New", monospace; }
 .sugerencia-nombre { font-weight: 500; }
 .sugerencia-ligas { font-size: 0.78rem; color: var(--tinta-suave); }
 
+/* Entidad que está en la base de datos pero no en el modelo: su respuesta se
+   calcula proyectándola. Se marca en la lista de sugerencias y en la de
+   candidatos, en el tono de los avisos y no en el de un error: es una respuesta
+   válida de otra clase, no un fallo. */
+.marca-proyectada {
+  display: inline-block;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--aviso);
+  background: var(--aviso-fondo);
+  border-radius: 3px;
+  padding: 0.05rem 0.3rem;
+  margin-left: 0.35rem;
+  white-space: nowrap;
+}
+
+/* El caso simétrico: entidad que está en el modelo y NO en la base de datos
+   elegida. Sale en el top-k (el modelo sabe cuánto se parece) pero sin enlace,
+   porque su ficha necesitaría estadísticas que aquí no hay. Se marca en gris y
+   no en el tono de aviso: no es una respuesta de otra clase, es la misma
+   respuesta con menos contexto alrededor. */
+.marca-sin-datos {
+  display: inline-block;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--tinta-suave);
+  background: var(--fondo);
+  border-radius: 3px;
+  padding: 0.05rem 0.3rem;
+  margin-left: 0.35rem;
+  white-space: nowrap;
+  cursor: help;
+}
+
+/* El aviso de la referencia proyectada acompaña al top-k entero, así que va
+   suelto (no dentro de una tarjeta) y se lee como texto normal. */
+.aviso-proyectada { font-size: 0.9rem; }
+
 /* --- Referencia ---------------------------------------------------------- */
 
 .referencia h1 { font-size: 1.7rem; margin-bottom: 0.15rem; }
@@ -691,6 +731,34 @@ code, pre { font-family: "Cascadia Mono", Consolas, "Courier New", monospace; }
 
 .navegacion a:hover { color: #fff; border-bottom-color: #fff; }
 
+/* Quién ha entrado y el botón de salir. En la cabecera (fondo oscuro), a la
+   derecha del todo: la sesión es contexto permanente, no una acción del flujo. */
+.sesion {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.6rem;
+}
+
+.sesion-usuario { color: #b9c7c0; font-size: 0.85rem; font-weight: 600; }
+
+.sesion .boton-secundario {
+  color: #b9c7c0;
+  border-color: #4a5a52;
+}
+
+.sesion .boton-secundario:hover { background: #24322b; color: #fff; }
+
+/* Los dos botones de la cabecera cuando no hay sesión. «Registrarse» va en
+   sólido y «Iniciar sesión» en contorno: el que abre camino a quien llega nuevo
+   es el primero, y el visitante sin cuenta es el caso por defecto ahora que el
+   recomendador es público. */
+.sesion .boton { line-height: 1.2; }
+
+/* --- Login ---------------------------------------------------------------- */
+
+.panel-login { max-width: 30rem; margin: 2rem auto; }
+
 /* --- Datos y modelos ------------------------------------------------------ */
 
 .rejilla-estado {
@@ -848,6 +916,26 @@ code, pre { font-family: "Cascadia Mono", Consolas, "Courier New", monospace; }
 
 .boton-secundario:hover { background: var(--acento-claro); }
 
+/* Botón de acción menor (borrar, cancelar, salir): la misma forma, más discreto,
+   porque son acciones que no se buscan pero tienen que estar a la vista. */
+.boton-menor { padding: 0.3rem 0.7rem; font-size: 0.8rem; }
+
+/* Un botón deshabilitado tiene que PARECERLO: al lado va siempre escrito el
+   motivo (cuota llena, tarea en curso), pero el aspecto es la primera pista. */
+.boton:disabled,
+.boton[disabled] {
+  background: var(--borde);
+  color: var(--tinta-suave);
+  border-color: var(--borde);
+  cursor: not-allowed;
+}
+
+.boton:disabled:hover { background: var(--borde); }
+
+/* Formularios de una sola acción (borrar, cancelar): son <form> por el token
+   CSRF, pero se leen como un botón suelto dentro de la línea. */
+.formulario-en-linea { display: inline-block; margin-left: 0.5rem; }
+
 /* --- Tarea en curso ------------------------------------------------------- */
 
 .tarea-cabecera {
@@ -886,12 +974,11 @@ code, pre { font-family: "Cascadia Mono", Consolas, "Courier New", monospace; }
   transition: width 0.4s ease;
 }
 
-.tarea-log {
-  max-height: 18rem;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  margin: 0.5rem 0;
-}
+/* Cifras de ancho fijo: el cronometro se refresca cada decima y con anchos
+   proporcionales el texto de al lado bailaria diez veces por segundo. */
+.tarea-tiempo { font-variant-numeric: tabular-nums; }
+
+.tarea-error { margin: 0.5rem 0 0; }
 
 /* --- Glosario ------------------------------------------------------------- */
 

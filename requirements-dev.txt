@@ -1,8 +1,21 @@
--r requirements.txt
+# Entorno de DESARROLLO: runtime + app + pytest.
+#
+# La app entra (vía `requirements-app.txt`, que ya arrastra `requirements.txt`)
+# porque la suite la prueba ENTERA: `src/tests/app/` son 791 de las ~2.478
+# pruebas. Sin flask, `python -m pytest` ni siquiera recolecta
+# (`src/tests/app/conftest.py` importa `flask.testing`), y sin waitress fallan
+# las e2e de `--produccion`. Ver docs/pruebas.md.
+-r requirements-app.txt
 pytest==9.1.1
 
 # Cobertura (informe de lineas ejecutadas): `pytest --cov=src`.
 pytest-cov==7.1.0
+
+# Pillow: la usa `tools/memoria/optimizar_imaxes.py` (`from PIL import Image`)
+# para adelgazar las capturas de la memoria. Hoy llega igualmente arrastrada por
+# matplotlib, pero se declara porque el proyecto la IMPORTA directamente: si
+# matplotlib dejase de depender de ella, el script se rompería sin aviso.
+pillow==12.3.0
 
 # Las pruebas de MUTACION usan mutmut, que no corre en Windows nativo: viven en
 # un venv de Linux/WSL (ver requirements-mutmut.txt, tools/setup_mutmut_wsl.sh y

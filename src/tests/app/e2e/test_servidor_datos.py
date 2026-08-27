@@ -32,6 +32,7 @@ from src.app.config import (
     SUBDIR_CONJUNTOS,
     SUBDIR_VARIANTES,
 )
+from src.tests.app.e2e.sesion import Sesion, escribir_usuarios
 from src.tests.conftest import RAIZ_REPO
 from src.tests.incremental.conftest import escribir_paquete
 
@@ -68,15 +69,24 @@ def entorno(tmp_path_factory: pytest.TempPathFactory, dir_modelos: Path,
     shutil.copytree(dir_modelos, copia_modelos)
     paquete = escribir_paquete(base / "paquete", competition_id=99, season_id=990,
                                competition_name="Liga Recien Llegada")
-    return {"bd": copia_bd, "modelos": copia_modelos, "paquete": paquete}
+    usuarios = escribir_usuarios(base / "usuarios.json")
+    return {"bd": copia_bd, "modelos": copia_modelos, "paquete": paquete,
+            "usuarios": usuarios}
 
 
 @pytest.fixture(scope="module")
-def servidor(entorno: dict) -> Iterator[str]:
+def servidor(entorno: dict) -> Iterator[Sesion]:
+    """Servidor real con una cuenta dada de alta, y una sesion ya iniciada.
+
+    Se devuelve la SESION y no la URL: toda la seccion «Datos» exige login, y los
+    POST necesitan token CSRF. La sesion hace las dos cosas, igual que el
+    navegador del usuario.
+    """
     puerto = _puerto_libre()
     proceso = subprocess.Popen(
         [sys.executable, "-m", "src.app",
          "--modelo", str(entorno["modelos"]), "--bd", str(entorno["bd"]),
+         "--usuarios", str(entorno["usuarios"]),
          "--host", "127.0.0.1", "--puerto", str(puerto)],
         cwd=str(RAIZ_REPO), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
@@ -88,13 +98,16 @@ def servidor(entorno: dict) -> Iterator[str]:
             if proceso.poll() is not None:
                 pytest.fail(f"el servidor murio al arrancar:\n{proceso.communicate()[0]}")
             try:
-                _pedir(base + "/datos/", timeout=1.0)
+                # `/login` es publica: responde en cuanto el servidor esta en pie.
+                _pedir(base + "/login", timeout=1.0)
                 break
             except OSError:
                 time.sleep(0.2)
         else:
             pytest.fail(f"el servidor no respondio en {ARRANQUE_MAX_S:.0f}s")
-        yield base
+        sesion = Sesion(base)
+        sesion.entrar()
+        yield sesion
     finally:
         proceso.terminate()
         try:
@@ -103,11 +116,11 @@ def servidor(entorno: dict) -> Iterator[str]:
             proceso.kill()
 
 
-def esperar_tarea(base: str) -> dict[str, Any]:
+def esperar_tarea(sesion: Sesion) -> dict[str, Any]:
     """Consulta el estado hasta que la tarea deje de estar en curso."""
     limite = time.monotonic() + TAREA_MAX_S
     while time.monotonic() < limite:
-        _, cuerpo = _pedir(base + "/datos/tarea")
+        _, cuerpo = sesion.get("/datos/tarea")
         tarea = json.loads(cuerpo)["tarea"]
         if tarea is not None and tarea["estado"] != "en_curso":
             return tarea
@@ -118,38 +131,38 @@ def esperar_tarea(base: str) -> dict[str, Any]:
 class TestFlujoCompleto:
     """Las pruebas comparten servidor y van en orden: incorporar y luego reentrenar."""
 
-    def test_01_el_panel_se_sirve(self, servidor: str) -> None:
-        codigo, cuerpo = _pedir(servidor + "/datos/")
+    def test_01_el_panel_se_sirve(self, servidor: Sesion) -> None:
+        codigo, cuerpo = servidor.get("/datos/")
         assert codigo == 200
         assert "Añadir partidos" in cuerpo
         assert "tareas.js" in cuerpo
 
-    def test_02_sirve_el_javascript_de_seguimiento(self, servidor: str) -> None:
-        codigo, cuerpo = _pedir(servidor + "/static/tareas.js")
+    def test_02_sirve_el_javascript_de_seguimiento(self, servidor: Sesion) -> None:
+        codigo, cuerpo = servidor.get("/static/tareas.js")
         assert codigo == 200 and cuerpo.strip()
 
     def test_03_validar_no_escribe_en_la_base_de_datos(
-        self, servidor: str, entorno: dict
+        self, servidor: Sesion, entorno: dict
     ) -> None:
         antes = entorno["bd"].stat().st_mtime_ns
-        codigo, _ = _pedir(servidor + "/datos/validar",
-                           {"paquete": str(entorno["paquete"]["raiz"])})
+        codigo, _ = servidor.post("/datos/validar",
+                                  {"paquete": str(entorno["paquete"]["raiz"])})
         assert codigo == 200      # la redirección la sigue urllib
         tarea = esperar_tarea(servidor)
-        assert tarea["estado"] == "terminada", tarea["lineas"]
+        assert tarea["estado"] == "terminada", tarea["error"]
         assert entorno["bd"].stat().st_mtime_ns == antes
 
     def test_04_incorporar_partidos_crea_un_conjunto_de_datos(
-        self, servidor: str, entorno: dict
+        self, servidor: Sesion, entorno: dict
     ) -> None:
         antes = entorno["bd"].stat().st_mtime_ns
-        codigo, _ = _pedir(servidor + "/datos/ingerir", {
+        codigo, _ = servidor.post("/datos/ingerir", {
             "paquete": str(entorno["paquete"]["raiz"]),
             "nombre_datos": "Con liga recien llegada",
         })
         assert codigo == 200
         tarea = esperar_tarea(servidor)
-        assert tarea["estado"] == "terminada", tarea["lineas"]
+        assert tarea["estado"] == "terminada", tarea["error"]
 
         # El conjunto nuevo tiene su BD y sus metadatos, y el base NO se ha tocado.
         carpeta = entorno["bd"].parent / SUBDIR_CONJUNTOS / "con-liga-recien-llegada"
@@ -158,26 +171,26 @@ class TestFlujoCompleto:
         assert entorno["bd"].stat().st_mtime_ns == antes
 
         # El panel enseña los dos: el base con 4 partidos y el nuevo con 5.
-        _, panel = _pedir(servidor + "/datos/")
+        _, panel = servidor.get("/datos/")
         assert "Liga Recien Llegada" in panel
         assert "<strong>4</strong> partidos" in panel
         assert "<strong>5</strong> partidos" in panel
 
     def test_05_entrenar_un_modelo_nuevo_lo_deja_servible(
-        self, servidor: str, entorno: dict
+        self, servidor: Sesion, entorno: dict
     ) -> None:
         """Se entrena con nombre, en su carpeta, sin tocar el modelo de origen."""
         antes = {
             ruta.name: ruta.stat().st_mtime_ns
             for ruta in entorno["modelos"].glob("*.npz")
         }
-        codigo, _ = _pedir(servidor + "/datos/reentrenar", {
+        codigo, _ = servidor.post("/datos/reentrenar", {
             "nombre": "Con liga recien llegada",
             "datos_origen": "con-liga-recien-llegada",
         })
         assert codigo == 200
         tarea = esperar_tarea(servidor)
-        assert tarea["estado"] == "terminada", tarea["lineas"]
+        assert tarea["estado"] == "terminada", tarea["error"]
 
         carpeta = entorno["modelos"] / SUBDIR_VARIANTES / "con-liga-recien-llegada"
         assert (carpeta / FICHERO_VARIANTE).is_file()
@@ -192,14 +205,14 @@ class TestFlujoCompleto:
             for ruta in entorno["modelos"].glob("*.npz")
         }
 
-    def test_06_los_equipos_nuevos_ya_se_pueden_consultar(self, servidor: str) -> None:
+    def test_06_los_equipos_nuevos_ya_se_pueden_consultar(self, servidor: Sesion) -> None:
         """Sin reiniciar la app: los catálogos se releen al cambiar BD y modelos.
 
         Con el modelo nuevo, que es el que conoce a los equipos recién llegados;
         el de fábrica sigue respondiendo con el universo de antes.
         """
-        codigo, cuerpo = _pedir(
-            servidor + "/api/sugerencias?q=Equipo&entidad=equipo"
+        codigo, cuerpo = servidor.get(
+            "/api/sugerencias?q=Equipo&entidad=equipo"
             "&modelo=con-liga-recien-llegada")
         assert codigo == 200
         sugerencias = json.loads(cuerpo)["sugerencias"]
@@ -213,12 +226,12 @@ class TestFlujoCompleto:
     def test_06b_el_modelo_nuevo_se_puede_elegir_en_el_buscador(
         self, servidor: str
     ) -> None:
-        codigo, cuerpo = _pedir(servidor + "/")
+        codigo, cuerpo = servidor.get("/")
         assert codigo == 200
         assert 'name="modelo"' in cuerpo
         assert "Con liga recien llegada" in cuerpo
 
-    def test_07_una_carpeta_inexistente_devuelve_400(self, servidor: str) -> None:
-        codigo, cuerpo = _pedir(servidor + "/datos/ingerir", {"paquete": "no/existe"})
+    def test_07_una_carpeta_inexistente_devuelve_400(self, servidor: Sesion) -> None:
+        codigo, cuerpo = servidor.post("/datos/ingerir", {"paquete": "no/existe"})
         assert codigo == 400
         assert "No existe la carpeta" in cuerpo

@@ -17,17 +17,44 @@
       elegir después en el buscador.
     </p>
 
+    {% if servidor_ocupado %}
+      {# Sin título ni dueño: solo que el servidor está ocupado. El «una tarea a
+         la vez» es global y el segundo usuario recibe 409; esto lo explica sin
+         contar qué está haciendo la otra cuenta. #}
+      <p class="aviso aviso-menor">
+        Hay otra tarea en curso en el servidor. Hasta que termine no se puede
+        lanzar ninguna ni borrar nada.
+      </p>
+    {% endif %}
+
     <div class="rejilla-estado">
       <article class="tarjeta-estado">
         <h2>Conjuntos de datos</h2>
+        <p class="apunte">
+          <strong>{{ cuota_datos.usados }} de {{ cuota_datos.tope }}</strong>
+          conjuntos propios. Los de fábrica no cuentan.
+        </p>
         <ul class="lista-modelos">
           {% for d in datos %}
             <li>
               <span class="etiqueta-modelo">{{ d.conjunto.nombre }}</span>
               <span class="apunte">
                 {{- ' de fábrica' if d.conjunto.es_base else ' creado añadiendo partidos' }}
+                {%- if d.conjunto.compartido and not d.conjunto.es_base %} · compartido{% endif %}
                 {%- if d.conjunto.fecha %} · {{ d.conjunto.fecha.strftime("%d/%m/%Y %H:%M") }}{% endif %}
               </span>
+              {% if d.conjunto.borrable_por(usuario) %}
+                {# `onsubmit` y no un diálogo propio: borrar una BD entera merece
+                   una confirmación, y sin JS el navegador no la pide. #}
+                <form class="formulario-en-linea" method="post"
+                      action="{{ url_for('datos.borrar_conjunto') }}"
+                      onsubmit="return confirm('¿Borrar el conjunto «{{ d.conjunto.nombre }}»? Los modelos entrenados sobre él seguirán ahí, pero perderán el contexto de esta base de datos.');">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                  <input type="hidden" name="slug" value="{{ d.conjunto.slug }}">
+                  <button type="submit" class="boton boton-secundario boton-menor"
+                          {{ 'disabled' if servidor_ocupado }}>Borrar</button>
+                </form>
+              {% endif %}
               {% if d.bd %}
                 <p class="cifras">
                   <span><strong>{{ d.bd.partidos }}</strong> partidos</span>
@@ -58,6 +85,10 @@
 
       <article class="tarjeta-estado">
         <h2>Modelos</h2>
+        <p class="apunte">
+          <strong>{{ cuota_modelos.usados }} de {{ cuota_modelos.tope }}</strong>
+          modelos propios. El de fábrica no cuenta.
+        </p>
         {% if modelos %}
           <ul class="lista-modelos">
             {% for m in modelos %}
@@ -65,8 +96,19 @@
                 <span class="etiqueta-modelo">{{ m.variante.nombre }}</span>
                 <span class="apunte">
                   {{- ' modelo de fábrica' if m.variante.es_base else ' reentrenado' }}
+                  {%- if m.variante.compartido and not m.variante.es_base %} · compartido{% endif %}
                   · datos: {{ nombres_conjunto.get(m.variante.datos, m.variante.datos) }}
                 </span>
+                {% if m.variante.borrable_por(usuario) %}
+                  <form class="formulario-en-linea" method="post"
+                        action="{{ url_for('datos.borrar_modelo') }}"
+                        onsubmit="return confirm('¿Borrar el modelo «{{ m.variante.nombre }}» y sus artefactos? No se puede deshacer.');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="slug" value="{{ m.variante.slug }}">
+                    <button type="submit" class="boton boton-secundario boton-menor"
+                            {{ 'disabled' if servidor_ocupado }}>Borrar</button>
+                  </form>
+                {% endif %}
                 {% if m.artefactos %}
                   <ul class="lista-artefactos">
                     {% for a in m.artefactos %}
@@ -75,7 +117,16 @@
                         F{{ a.clave.formulacion }} ·
                         {{ etiqueta_normalizacion[a.clave.normalizacion] }}
                         {% if a.fecha %}· {{ a.fecha.strftime("%d/%m/%Y %H:%M") }}{% endif %}
+                        {%- if a.cobertura.medible %}
+                          · {{ a.cobertura.cubiertas }} de
+                          {{ a.cobertura.en_datos }} {{ a.cobertura.plural }}
+                        {%- endif %}
                       </li>
+                      {# La cifra de arriba ya lo dice, pero solo si se comparan
+                         los dos números; el aviso lo dice sin tener que hacerlo. #}
+                      {% if not a.cobertura.coherente %}
+                        <li class="aviso aviso-menor">{{ a.cobertura.texto | capitalize }}.</li>
+                      {% endif %}
                     {% endfor %}
                   </ul>
                 {% else %}
@@ -99,22 +150,37 @@
   </section>
 
   <section class="panel" id="tarea" data-url="{{ url_for('datos.tarea') }}"
-           {% if tarea %}data-activa="{{ 1 if tarea.estado == 'en_curso' else 0 }}"{% endif %}>
+           {% if tarea %}data-activa="{{ 1 if tarea.estado == 'en_curso' else 0 }}"
+           data-segundos="{{ '%.3f' | format(tarea.segundos) }}"{% endif %}>
     <h2>Tarea</h2>
     {% if tarea %}
+      {# El tiempo lo refresca `tareas.js` cada décima mientras la tarea corre;
+         esto es el valor con el que arranca (mismo formato, para que no dé un
+         salto al primer refresco) y lo definitivo cuando ya ha terminado. #}
       <div class="tarea-cabecera">
         <span class="tarea-titulo">{{ tarea.titulo }}</span>
         <span class="tarea-estado estado-{{ tarea.estado }}">{{ tarea.estado }}</span>
-        <span class="apunte tarea-tiempo">{{ tarea.segundos | round(1) }} s</span>
+        <span class="apunte tarea-tiempo">{{ "%.1f" | format(tarea.segundos) }} s</span>
       </div>
       <div class="barra"><div class="barra-relleno"
         style="width: {{ ((tarea.progreso or 0) * 100) | round(1) }}%"></div></div>
       <p class="apunte tarea-paso">{{ tarea.paso }}</p>
-      <pre class="comandos tarea-log">{{ tarea.lineas | join("\n") }}</pre>
-      {# `comando` es la lista de argumentos; se une igual que en `Tarea.como_dict`,
-         que es lo que reescribe el JS mientras la tarea corre. #}
-      <p class="apunte">Comando:
-        <code class="tarea-comando">{{ tarea.comando | join(" ") }}</code></p>
+      {# Sin consola en pantalla, una tarea fallida no diría por qué: esta línea
+         es lo único que queda del log (la última línea de la salida). #}
+      <p class="aviso aviso-menor tarea-error" {{ '' if tarea.error else 'hidden' }}>
+        {{- tarea.error -}}
+      </p>
+      {% if tarea.estado == 'en_curso' %}
+        {# Salida de emergencia: sin esto, un subproceso colgado bloquea la
+           sección para todas las cuentas hasta reiniciar el servidor. #}
+        <form class="formulario-en-linea" method="post"
+              action="{{ url_for('datos.cancelar') }}"
+              onsubmit="return confirm('¿Cancelar la tarea? Lo que lleve hecho se pierde.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="id" value="{{ tarea.id }}">
+          <button type="submit" class="boton boton-secundario boton-menor">Cancelar</button>
+        </form>
+      {% endif %}
     {% else %}
       <p class="apunte">No se ha lanzado ninguna tarea todavía.</p>
     {% endif %}
@@ -135,6 +201,7 @@
       para que los jugadores nuevos entren en las recomendaciones.
     </p>
     <form class="formulario" method="post" action="{{ url_for('datos.ingerir') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       {# Se rellenan con lo último enviado: el flujo natural es validar y, con lo
          mismo, incorporar, y la redirección posterior vaciaría el formulario. #}
       <div class="campo campo-ancho">
@@ -198,14 +265,23 @@
            desactiva desde el propio botón con `formnovalidate`. #}
         <button class="boton boton-secundario" type="submit" formnovalidate
                 formaction="{{ url_for('datos.validar') }}">Solo validar</button>
-        <button class="boton" type="submit" {{ 'disabled' if not conjuntos }}>
+        <button class="boton" type="submit"
+                {{ 'disabled' if not conjuntos or not cuota_datos.hay_hueco }}>
           Crear el conjunto de datos
         </button>
       </div>
+      {# Un botón deshabilitado sin explicación es un fallo de la interfaz: aquí
+         va siempre el motivo. #}
       {% if not conjuntos %}
         <p class="apunte">
           Hace falta una base de datos de partida: extráela con
           <code>python -m src.extraccion.extract</code>.
+        </p>
+      {% elif not cuota_datos.hay_hueco %}
+        <p class="aviso aviso-menor">
+          Ya tienes {{ cuota_datos.usados }} de {{ cuota_datos.tope }} conjuntos
+          de datos, que es el máximo por cuenta. Borra alguno de los tuyos para
+          poder crear otro.
         </p>
       {% endif %}
     </form>
@@ -221,6 +297,7 @@
       en el buscador. Puede tardar.
     </p>
     <form class="formulario" method="post" action="{{ url_for('datos.reentrenar') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="campo campo-ancho">
         <label for="nombre">Nombre del modelo</label>
         <input type="text" id="nombre" name="nombre" required
@@ -269,7 +346,7 @@
       {% endif %}
       <div class="botonera">
         <button class="boton" type="submit"
-                {{ 'disabled' if not origenes or not conjuntos }}>
+                {{ 'disabled' if not origenes or not conjuntos or not cuota_modelos.hay_hueco }}>
           Entrenar
         </button>
       </div>
@@ -277,6 +354,12 @@
         <p class="apunte">
           Hace falta un modelo de partida: constrúyelo con
           <code>python -m src.similitud.build</code>.
+        </p>
+      {% elif not cuota_modelos.hay_hueco %}
+        <p class="aviso aviso-menor">
+          Ya tienes {{ cuota_modelos.usados }} de {{ cuota_modelos.tope }} modelos,
+          que es el máximo por cuenta. Borra alguno de los tuyos para poder
+          entrenar otro.
         </p>
       {% endif %}
     </form>

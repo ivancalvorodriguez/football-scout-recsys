@@ -29,9 +29,23 @@ def salida(barrido_2x2: Path) -> Path:
 
 class TestEntregables:
     def test_dibuja_un_png_por_metrica_y_modelo(self, salida: Path) -> None:
+        """Y cada modelo sobre SUS ejes: los `F2_*` no reconstruyen un modelo F5,
+        asi que dibujarlo sobre ellos lo dejaria en una sola casilla.
+        """
         for metrica in ("top1", "asimetria"):
-            for modelo in ("F2_equipo_global", "F5_equipo_global"):
-                assert (salida / f"{modelo}__{metrica}__F2_L1_x_F2_BETA.png").exists()
+            assert (salida /
+                    f"F2_equipo_global_euclidea__{metrica}__F2_L1_x_F2_BETA.png"
+                    ).exists()
+            for modelo in ("F5_equipo_global_euclidea",
+                           "F5_equipo_por_liga_euclidea"):
+                assert (salida / f"{modelo}__{metrica}"
+                        "__F5_EASE_LAMBDA_x_F5_RFF_DIM.png").exists()
+
+    def test_ningun_modelo_se_dibuja_sobre_los_ejes_de_la_otra_formulacion(
+        self, salida: Path
+    ) -> None:
+        assert not list(salida.glob("F5_*__F2_L1_x_F2_BETA.png"))
+        assert not list(salida.glob("F2_*__F5_EASE_LAMBDA_x_F5_RFF_DIM.png"))
 
     def test_escribe_la_rejilla_medida_en_csv(self, salida: Path) -> None:
         assert (salida / "rejilla_3d.csv").exists()
@@ -80,9 +94,17 @@ class TestScoreCompuesto:
     ) -> None:
         """La unica figura que superpone modelos, porque el score es lo unico
         comparable entre ellos (z-scoreado dentro de la entidad).
+
+        Superpone los que COMPARTEN ejes —aqui, las dos normalizaciones de la F5—:
+        el modelo F2 no vive en este plano y dibujarlo aqui seria un plano
+        horizontal a su unico valor.
         """
-        assert (salida /
-                f"comparativa_equipo__{puntuacion.NOMBRE}__F2_L1_x_F2_BETA.png").exists()
+        assert (salida / f"comparativa_equipo__{puntuacion.NOMBRE}"
+                "__F5_EASE_LAMBDA_x_F5_RFF_DIM.png").exists()
+
+    def test_no_superpone_modelos_que_no_comparten_ejes(self, salida: Path) -> None:
+        """Solo hay un modelo F2, asi que en su plano no hay nada que comparar."""
+        assert not list(salida.glob("comparativa_*__F2_L1_x_F2_BETA.png"))
 
     def test_imprime_el_ranking_por_entidad(self, barrido_2x2: Path, capsys) -> None:
         figuras3d.generar(barrido_2x2, barrido_2x2 / "f")
@@ -126,7 +148,7 @@ class TestFiltrosYAvisos:
         self, barrido_2x2: Path
     ) -> None:
         out = barrido_2x2 / "solo_f5"
-        figuras3d.generar(barrido_2x2, out, modelos_sel={"F5_equipo_global"},
+        figuras3d.generar(barrido_2x2, out, modelos_sel={"F5_equipo_global_euclidea"},
                           con_score=False)
         assert not list(out.glob("F2_*.png"))
 
@@ -146,8 +168,10 @@ class TestFiltrosYAvisos:
                   for i, (l1, b) in enumerate(
                       [(a, c) for a in (0.25, 0.5, 0.75) for c in (1.0, 2.0, 3.0)],
                       start=1)}
-        # El maximo cae en la esquina (0.75, 3.0): borde en los dos ejes.
-        filas = [fila_metrica(n, "F5_equipo_global", "top1",
+        # El maximo cae en la esquina (0.75, 3.0): borde en los dos ejes. El modelo
+        # es F2 porque los ejes barridos son los suyos: un F5 no se dibuja sobre
+        # `F2_L1 x F2_BETA` (no lo reconstruyen).
+        filas = [fila_metrica(n, "F2_equipo_global", "top1",
                               c["F2_L1"] + c["F2_BETA"])
                  for n, c in combis.items()]
         d = escribir_barrido(barrido_2x2.parent / "borde", filas, combis)

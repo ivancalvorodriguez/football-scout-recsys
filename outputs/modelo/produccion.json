@@ -1,0 +1,94 @@
+{
+  "descripcion": "Linaje de los artefactos servidos desde la raiz de outputs/modelo/. Se escribe a mano al promover un modelo del barrido a produccion: sin el no hay forma de saber que combinacion de hiperparametros se esta sirviendo.",
+  "promovido_en": "2026-08-26",
+  "criterio": "Mejor score compuesto POR ENTIDAD de los barridos jugador_v3 y equipo_v3. A diferencia de la promocion anterior, ya no hay que excluir nada a mano: mahalanobis se retiro de la rejilla el 26-8-2026 (su blanqueo deshace la ponderacion del bloque de posicion, medido 2,0 % -> 33,5 % de la distancia^2) y sus metricas se conservan aparte en docs/evaluacion/mahalanobis_descartada.csv. Los scores se calculan con FACTOR_GENERALIZACION = 1.0 (las gemelas fuera de muestra pesan lo mismo que su original; valia 1.5 hasta esa misma fecha), asi que NO son comparables con los que figuraban aqui antes. El score sigue siendo una heuristica de ordenacion, no un criterio validado.",
+  "datos": {
+    "ruta": "outputs/db/scouting.db",
+    "bytes": 12029952,
+    "mtime_ns": 1786127617277354700,
+    "mtime": "2026-08-07T20:33:37",
+    "jugadores": 2640,
+    "equipos": 98
+  },
+  "ajustados_sobre": {
+    "ruta": "outputs/db/entrenamiento/scouting.db",
+    "excluir_ligas": [
+      "1238-108"
+    ],
+    "motivo": "Los dos salen de barridos lanzados con --holdout india sobre la BD de entrenamiento, asi que se ajustaron SIN la Indian Super League. Esa BD es la base mas esa liga, de modo que quitarsela deja exactamente el universo de outputs/db/scouting.db: los entity_ids de los dos artefactos coinciden uno a uno con los 2640 jugadores y los 98 equipos de la BD servida (verificado). El z-score no lo cambia: en el modelo de jugador es por_liga (cada liga con sus mu/sd) y en el de equipo es global sobre esas mismas filas."
+  },
+  "reemplaza_a": {
+    "ruta": "outputs/modelo_historico_20260826",
+    "motivo": "Ahi esta el jugador v87 (F5_RFF_DIM 1024), servido desde el 25-8-2026, con el produccion.json de entonces. El equipo no cambia. Los euclideos v83/v238 siguen en outputs/modelo_historico_20260825 y los anteriores en outputs/modelo_historico_20260816."
+  },
+  "cambios_respecto_al_anterior": [
+    "Jugador: v87 -> v91, es decir F5_RFF_DIM 1024 -> 1536. Todo lo demas igual: F5, por_liga, manhattan, EASE_LAMBDA 0.0 (sin termino ridge), MMD.",
+    "Equipo: sin cambios (v349).",
+    "Por que ahora v91 y antes v87: la rejilla cambio dos veces bajo los mismos numeros. Se retiro mahalanobis (dejo de fijar la media y la desviacion de la z) y las gemelas de la fase 7 pasaron a pesar 1,0 en vez de 1,5. Ninguna metrica de ninguno de los dos artefactos se movio; lo que cambio es la escala con la que se comparan.",
+    "Cautela declarada: v91 le gana a v87 en las metricas de la fase 7 (clasificacion por vecindad +0.035 y pureza posicional +0.021, las dos CIRCULARES, y cobertura +0.028) y le pierde en las de dentro de muestra (auto-similitud 0.289 vs 0.299, MRR 0.366 vs 0.378, estabilidad 0.405 vs 0.428). El score compuesto los ordena asi; las metricas por separado no dan un ganador limpio. Las cinco primeras celdas de jugador caben en 0,16 puntos de score.",
+    "El optimo de F5_EASE_LAMBDA sigue en el BORDE de la rejilla (0.0) en jugador: el re-ranking EASE no aporta nada ahi, y lo que se sirve es practicamente la etapa 1 (MMD) sola. En equipo el optimo es interior (0.03)."
+  ],
+  "artefactos": {
+    "formulacion5_jugador_por_liga_manhattan": {
+      "origen": {
+        "barrido": "outputs/evaluacion/jugador_v3",
+        "combinacion": "v91",
+        "ruta": "outputs/evaluacion/jugador_v3/v91/modelo/formulacion5_jugador_por_liga_manhattan",
+        "score_compuesto": 1.856,
+        "puesto": "1 de 462 celdas de jugador_v3"
+      },
+      "celda": {
+        "distancia": "manhattan",
+        "entidad": "jugador",
+        "formulacion": "5",
+        "normalizacion": "por_liga"
+      },
+      "huella": "14a0d7f7a754a905",
+      "hiperparametros": {
+        "F5_EASE_LAMBDA": 0.0,
+        "F5_METODO_JUGADOR": "mmd",
+        "F5_RFF_DIM": 1536,
+        "F5_RFF_SEED": 20240714,
+        "F5_SINKHORN_ITERS": 100,
+        "F5_SINKHORN_REG": 0.5,
+        "F_CLIP_Z": 6.0,
+        "POSITION_SCALING": "zscore_sqrt",
+        "USE_POSITION_FEATURES": true
+      },
+      "sha256": {
+        "npz": "f5b48f471fccc1aa33cbafea35b828ffe40ad2d7c5a48d8fcce0dddf76f223d0",
+        "warm": "5e43b5bff1708bf7045be7dda89d1cf096002a54c2ad398ccfca87e4f3437bd0"
+      }
+    },
+    "formulacion5_equipo_global_manhattan": {
+      "origen": {
+        "barrido": "outputs/evaluacion/equipo_v3",
+        "combinacion": "v349",
+        "ruta": "outputs/evaluacion/equipo_v3/v349/modelo/formulacion5_equipo_global_manhattan",
+        "score_compuesto": 1.398,
+        "puesto": "1 de 1388 celdas de equipo_v3",
+        "sin_cambios": "El artefacto NO se ha vuelto a copiar: v349 ya era el que se servia y sigue siendo el primero de su entidad con los pesos nuevos. Solo cambia la cifra del score, que se recalculo."
+      },
+      "celda": {
+        "distancia": "manhattan",
+        "entidad": "equipo",
+        "formulacion": "5",
+        "normalizacion": "global"
+      },
+      "huella": "cdfb77f4c7df54f17988a55487bffd71b5222f400d2023587323662a160f076e",
+      "hiperparametros": {
+        "F5_EASE_LAMBDA": 0.03,
+        "F5_METODO_EQUIPO": "mmd",
+        "F5_RFF_DIM": 1216,
+        "F5_RFF_SEED": 20240714,
+        "F5_SINKHORN_ITERS": 100,
+        "F5_SINKHORN_REG": 0.5,
+        "F_CLIP_Z": 6.0
+      },
+      "sha256": {
+        "npz": "1e222506fba73b66ce1d36a44f438c9fcfea33efdb5c25adc22752e1defcc5fb",
+        "warm": "9cb56e7c8751848af377d87a393b7afa17f1ffdabc1cc5d271d33f130f2cf318"
+      }
+    }
+  }
+}

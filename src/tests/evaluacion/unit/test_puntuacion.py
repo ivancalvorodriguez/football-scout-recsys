@@ -25,11 +25,12 @@ def _fila(modelo: str, combinacion: str, metrica: str, valor: float,
 
 class TestOrientacion:
     def test_la_asimetria_es_menor_es_mejor(self) -> None:
-        """Es la unica: mide cuanta señal direccional corrige el pipeline."""
+        """Mide cuanta señal direccional corrige el pipeline."""
         assert puntuacion.orientacion("asimetria") == "min"
 
     def test_el_resto_de_metricas_es_mayor_es_mejor(self) -> None:
-        for metrica in ("top1", "mrr", "rbo_medio", "knn_accuracy", "coverage"):
+        for metrica in ("top1", "mrr", "rbo_medio", "knn_accuracy", "coverage",
+                        "gen_top1", "gen_knn_accuracy"):
             assert puntuacion.orientacion(metrica) == "max"
 
     def test_una_metrica_desconocida_asume_mayor_es_mejor(self) -> None:
@@ -187,3 +188,99 @@ class TestRanking:
         lineas = puntuacion.ranking(puntuacion.puntuar(df))
         assert any("+" in ln for ln in lineas[1:])
         assert any("-" in ln for ln in lineas[1:])
+
+
+class TestGeneralizacionEnElScore:
+    """Cada metrica cuenta dos veces: dentro de muestra y fuera (Fase 7).
+
+    Lo que se fija aqui es la REGLA de los pesos (la gemela pesa lo MISMO que su
+    original) y que no tenerlas no penalice. El valor concreto de cada peso vive
+    en `PESOS_EN_MUESTRA` y puede cambiar; la relacion entre los dos, no.
+    """
+
+    def test_cada_metrica_medible_fuera_tiene_su_gemela(self) -> None:
+        from src.evaluacion import generalizacion
+
+        for metrica in puntuacion.PESOS_EN_MUESTRA:
+            gemela = generalizacion.nombre_metrica(metrica)
+            if metrica in generalizacion.METRICAS:
+                assert gemela in puntuacion.PESOS
+            else:
+                # `asimetria`: fuera de muestra no hay S que pueda ser asimetrica.
+                assert metrica in generalizacion.SIN_GEMELA
+                assert gemela not in puntuacion.PESOS
+
+    def test_la_gemela_pesa_lo_mismo_que_su_original(self) -> None:
+        from src.evaluacion import generalizacion
+
+        for metrica, peso in puntuacion.PESOS_EN_MUESTRA.items():
+            gemela = generalizacion.nombre_metrica(metrica)
+            if gemela in puntuacion.PESOS:
+                assert puntuacion.PESOS[gemela] == pytest.approx(
+                    peso * puntuacion.FACTOR_GENERALIZACION)
+                assert puntuacion.PESOS[gemela] == pytest.approx(peso)
+
+    def test_son_el_doble_de_metricas_menos_las_que_no_tienen_gemela(self) -> None:
+        from src.evaluacion import generalizacion
+
+        assert len(puntuacion.PESOS) == (
+            2 * len(puntuacion.PESOS_EN_MUESTRA) - len(generalizacion.SIN_GEMELA))
+
+    def test_fuera_de_muestra_pesa_igual_que_dentro(self) -> None:
+        """Es la decision de fondo: la gemela cuenta, pero no se pondera al alza.
+
+        Ponderarla amplificaria tambien las gemelas CIRCULARES (`gen_pureza_top1`
+        y `gen_knn_accuracy` usan la posicion como etiqueta), que es lo que el
+        score no debe premiar."""
+        assert puntuacion.FACTOR_GENERALIZACION == pytest.approx(1.0)
+        assert puntuacion.PESOS["gen_top1"] == pytest.approx(puntuacion.PESOS["top1"])
+
+    def test_mueve_el_ranking(self) -> None:
+        """Con la misma metrica dentro de muestra, gana quien generaliza mejor."""
+        filas = []
+        for combi, (top1, gen) in {"v01": (0.5, 0.9), "v02": (0.5, 0.3)}.items():
+            filas.append(_fila("F5_equipo_global", combi, "top1", top1))
+            filas.append(_fila("F5_equipo_global", combi, "gen_top1", gen))
+        scores = puntuacion.puntuar(pd.DataFrame(filas))
+        mejor = scores.sort_values(puntuacion.NOMBRE, ascending=False).iloc[0]
+        assert mejor["combinacion"] == "v01"
+        assert mejor["z_gen_top1"] > 0
+
+    def test_ganar_fuera_y_perder_dentro_por_el_mismo_margen_empata(self) -> None:
+        """Corolario de que pesen igual: dos modelos simetricos no se separan.
+
+        Con el factor por encima de 1 el de fuera mandaba; ahora la decision entre
+        los dos la tienen que tomar las demas metricas, no el peso."""
+        filas = [
+            _fila("F5_equipo_global", "v01", "top1", 0.1),
+            _fila("F5_equipo_global", "v01", "gen_top1", 0.9),
+            _fila("F5_equipo_global", "v02", "top1", 0.9),
+            _fila("F5_equipo_global", "v02", "gen_top1", 0.1),
+        ]
+        scores = puntuacion.puntuar(pd.DataFrame(filas)).set_index("combinacion")
+        assert scores.loc["v01", puntuacion.NOMBRE] == pytest.approx(
+            scores.loc["v02", puntuacion.NOMBRE])
+
+    def test_un_barrido_sin_la_fase_7_puntua_como_antes(self) -> None:
+        """No tenerlas no penaliza: el score se renormaliza sobre las que hay, que
+        es lo que ya hacia con la pureza del equipo."""
+        filas = [_fila("F5_equipo_global", c, "top1", v)
+                 for c, v in (("v01", 0.5), ("v02", 0.1))]
+        scores = puntuacion.puntuar(pd.DataFrame(filas))
+        assert scores["n_metricas"].tolist() == [1, 1]
+        assert scores[puntuacion.NOMBRE].notna().all()
+        assert scores["z_gen_top1"].isna().all()
+
+    def test_no_se_mezclan_las_entidades(self) -> None:
+        """Un jugador con gemelas y un equipo sin ellas no compiten: las z se
+        calculan dentro de la entidad."""
+        filas = [
+            _fila("F5_jugador_global", "v01", "gen_top1", 0.8, "jugador"),
+            _fila("F5_jugador_global", "v02", "gen_top1", 0.2, "jugador"),
+            _fila("F2_equipo_global", "v01", "top1", 0.5),
+            _fila("F2_equipo_global", "v02", "top1", 0.4),
+        ]
+        scores = puntuacion.puntuar(pd.DataFrame(filas))
+        equipo = scores[scores["entidad"] == "equipo"]
+        assert equipo["z_gen_top1"].isna().all()
+        assert equipo[puntuacion.NOMBRE].notna().all()

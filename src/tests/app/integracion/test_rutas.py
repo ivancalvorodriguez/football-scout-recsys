@@ -16,6 +16,7 @@ from src.tests.app.conftest import (
     CONJUNTO_SLUG,
     VARIANTE_NOMBRE,
     VARIANTE_SLUG,
+    cliente_autenticado,
 )
 
 pytestmark = pytest.mark.integracion
@@ -35,8 +36,11 @@ class TestInicio:
         html = _texto(cliente.get("/"))
         assert "Jugador" in html and "Equipo" in html
 
-    def test_sin_modelos_explica_como_construirlos(self, tmp_path: Path) -> None:
-        cliente = crear_app(tmp_path / "vacio", testing=True).test_client()
+    def test_sin_modelos_explica_como_construirlos(
+        self, tmp_path: Path, fichero_usuarios: Path
+    ) -> None:
+        cliente = cliente_autenticado(crear_app(
+            tmp_path / "vacio", ruta_usuarios=fichero_usuarios, testing=True))
         r = cliente.get("/")
         assert r.status_code == 503
         assert "src.similitud.build" in _texto(r)
@@ -75,10 +79,56 @@ class TestSimilares:
         assert "Real Madrid" in _texto(r) or "Sevilla" in _texto(r)
 
     def test_un_nombre_ambiguo_lista_candidatos_en_vez_de_fallar(self, cliente) -> None:
+        """Hay dos "Repetido" en el modelo Y en la BD: el usuario elige."""
+        r = cliente.get("/similares?entidad=jugador&nombre=Repetido")
+        assert r.status_code == 200
+        html = _texto(r)
+        assert html.count("Nombre Repetido") >= 2
+
+    def test_quien_no_esta_en_la_bd_no_vuelve_ambigua_la_busqueda(
+        self, cliente
+    ) -> None:
+        """«Marc Garcia» está en el modelo y no en la BD: no cuenta como opción.
+
+        Antes «Garcia» era ambiguo por él y salía una lista de dos; ahora resuelve
+        derecho al único García del que hay datos.
+
+        (Marc sí puede aparecer más abajo, entre los CANDIDATOS de Sergio: eso es
+        otra cosa y se comprueba en `test_como_candidato_de_otro_...`.)
+        """
         r = cliente.get("/similares?entidad=jugador&nombre=Garcia")
         assert r.status_code == 200
         html = _texto(r)
-        assert "Sergio Garcia" in html and "Marc Garcia" in html
+        assert "Varias coincidencias" not in html    # no es la página de elegir
+        assert "id 30" in html                       # la referencia es Sergio
+
+    def test_pedir_a_quien_la_bd_no_tiene_explica_por_que(self, cliente) -> None:
+        """404, pero diciendo que el modelo sí lo conoce y lo que falta son datos."""
+        r = cliente.get("/similares?entidad=jugador&nombre=Marc Garcia")
+        assert r.status_code == 404
+        assert "no tiene a este jugador" in _texto(r)
+        r = cliente.get("/similares?entidad=jugador&id=40")
+        assert r.status_code == 404
+        assert "no tiene a este jugador" in _texto(r)
+
+    def test_como_candidato_de_otro_si_sale_pero_sin_enlace(self, cliente) -> None:
+        """El modelo sabe cuánto se parece: esconderlo tiraría esa información.
+
+        Lo que no tiene es ficha —ni similares propios—, así que sale rotulado y
+        su nombre NO es un enlace: no hay opción que pulsar que acabe en un 404.
+        """
+        html = _texto(cliente.get("/similares?entidad=jugador&id=10&k=50"))
+        assert "Marc Garcia" in html
+        assert "fuera de estos datos" in html
+        assert "/jugador/40" not in html
+        # El resto de candidatos sí se enlazan (el 30 está en la BD).
+        assert "/jugador/30" in html
+
+    def test_la_api_marca_al_candidato_que_no_esta_en_los_datos(self, cliente) -> None:
+        datos = cliente.get("/api/similares?entidad=jugador&id=10&k=50").get_json()
+        marcas = {c["id"]: c["en_datos"] for c in datos["candidatos"]}
+        assert marcas[40] is False
+        assert marcas[30] is True
 
     def test_un_nombre_inexistente_da_404_con_explicacion(self, cliente) -> None:
         r = cliente.get("/similares?entidad=jugador&nombre=Cristiano")
@@ -92,8 +142,10 @@ class TestSimilares:
         assert cliente.get("/similares?entidad=arbitro&nombre=x").status_code == 400
 
     def test_modelo_desconocido(self, cliente) -> None:
+        """404 y no 400: un slug que no le corresponde a esta cuenta no se
+        confirma ni se desmiente (ver `_modelo_pedido`)."""
         r = cliente.get("/similares?entidad=jugador&nombre=Messi&modelo=fantasma")
-        assert r.status_code == 400
+        assert r.status_code == 404
 
     def test_sin_pedir_modelo_responde_el_base(self, cliente) -> None:
         html = _texto(cliente.get("/similares?entidad=jugador&nombre=Messi"))
@@ -110,7 +162,7 @@ class TestSimilares:
         assert r.status_code == 404
 
     def test_un_modelo_que_no_cubre_la_entidad_no_finge_que_no_hay_nada(
-        self, dir_modelos: Path, tmp_path: Path
+        self, dir_modelos: Path, tmp_path: Path, fichero_usuarios: Path
     ) -> None:
         """Un reentrenamiento a medias (solo jugador) pedido para equipo informa de ESO."""
         destino = tmp_path / "a_medias"
@@ -121,7 +173,8 @@ class TestSimilares:
             (raiz / origen.name).write_bytes(origen.read_bytes())
             base = dir_modelos / f"{ClaveModelo('equipo').stem}{sufijo}"
             (destino / base.name).write_bytes(base.read_bytes())
-        cliente = crear_app(destino, testing=True).test_client()
+        cliente = cliente_autenticado(crear_app(
+            destino, ruta_usuarios=fichero_usuarios, testing=True))
         r = cliente.get("/similares?entidad=equipo&nombre=Barcelona&modelo=solo-jugador")
         assert r.status_code == 503
         assert "no tiene artefacto de equipo" in _texto(r)
@@ -277,7 +330,8 @@ class TestFaseEnLasCoincidencias:
         """Los valores reales se reconstruyen de la BD; sin ella no los hay."""
         html = _texto(cliente_sin_bd.get("/jugador/10"))
         assert "z-secundario" not in html
-        assert "Medidas en z-scores frente a la media global (todas las ligas)" in html
+        assert ("Medidas en z-scores frente a "
+                + config_app.REFERENCIA_Z["por_liga"]) in html
 
     def test_sin_bd_la_ficha_sigue_completa(self, cliente_sin_bd) -> None:
         html = _texto(cliente_sin_bd.get("/jugador/10"))
@@ -321,12 +375,12 @@ class TestConjuntoDeDatosDelModelo:
         assert f"datos: {CONJUNTO_NOMBRE}" in html
 
     def test_un_conjunto_que_ya_no_esta_no_deja_de_servir(
-        self, dir_modelos: Path, tmp_path: Path
+        self, dir_modelos: Path, tmp_path: Path, fichero_usuarios: Path
     ) -> None:
         """Se pierde algun adorno; el modelo se sigue sirviendo."""
-        cliente = crear_app(
-            dir_modelos, db_path=tmp_path / "otra" / "scouting.db", testing=True
-        ).test_client()
+        cliente = cliente_autenticado(crear_app(
+            dir_modelos, db_path=tmp_path / "otra" / "scouting.db",
+            ruta_usuarios=fichero_usuarios, testing=True))
         r = cliente.get(f"/similares?entidad=jugador&id=10&k=1&modelo={VARIANTE_SLUG}")
         assert r.status_code == 200
 
@@ -334,36 +388,53 @@ class TestConjuntoDeDatosDelModelo:
 class TestReferenciaDelZScore:
     """Contra QUE se mide el z que se enseña depende de la normalizacion.
 
-    Los modelos servibles son los dos `global`, asi que la media es la de todo el
-    dataset, mezclando ligas: decir «la media de su liga» ahi seria falso, y
-    ademas contradiria a la etiqueta del modelo que sale al lado ("z-score
-    global"). El rotulo no esta escrito en la plantilla, sale de
-    `config.REFERENCIA_Z` segun la normalizacion, que es lo que permitiria servir
-    `por_liga` sin que la interfaz mienta.
+    Decir «la media global» en la ficha de un jugador servido `por_liga` seria
+    falso y contradiria ademas a la etiqueta del modelo que sale al lado. El
+    rotulo no esta escrito en la plantilla: sale de `config.REFERENCIA_Z` segun la
+    normalizacion del modelo, y esta clase es lo que comprueba que de verdad la
+    sigue.
+
+    Las expectativas se DERIVAN de `config.MODELO_BASE` en vez de fijarse a mano:
+    que normalizacion sirve cada entidad ha cambiado ya dos veces al promover
+    modelos nuevos (las dos `global`, luego jugador `por_liga` + equipo `global`,
+    y desde el 25-8-2026 las dos `por_liga`), y lo que se quiere garantizar es la
+    correspondencia, no una pareja concreta.
     """
+
+    POR_LIGA = config_app.REFERENCIA_Z["por_liga"]
+    GLOBAL = config_app.REFERENCIA_Z["global"]
+
+    @staticmethod
+    def _esperado(entidad: str) -> tuple[str, str]:
+        """(rotulo que debe salir, rotulo que NO debe salir) para esa entidad."""
+        _, normalizacion = config_app.MODELO_BASE[entidad]
+        otra = "global" if normalizacion == "por_liga" else "por_liga"
+        return config_app.REFERENCIA_Z[normalizacion], config_app.REFERENCIA_Z[otra]
 
     def test_el_rotulo_depende_de_la_normalizacion(self) -> None:
         """Las dos redacciones existen; la app sirve la que le toque al modelo."""
-        assert "liga" in config_app.REFERENCIA_Z["por_liga"]
-        assert "global" in config_app.REFERENCIA_Z["global"]
+        assert "liga" in self.POR_LIGA
+        assert "global" in self.GLOBAL
+        assert self.POR_LIGA != self.GLOBAL
 
-    def test_los_resultados_no_hablan_de_ligas(self, cliente) -> None:
-        html = _texto(cliente.get("/similares?entidad=jugador&id=10&k=1"))
-        assert "la media global (todas las ligas)" in html
-        assert "media de su liga" not in html
+    @pytest.mark.parametrize("entidad, id_", [("jugador", 10), ("equipo", 1)])
+    def test_cada_entidad_usa_la_de_su_modelo(self, cliente, entidad, id_) -> None:
+        """Mismo codigo, dos modelos: cada uno con el rotulo de SU normalizacion."""
+        toca, no_toca = self._esperado(entidad)
+        html = _texto(cliente.get(f"/similares?entidad={entidad}&id={id_}&k=1"))
+        assert toca in html
+        assert no_toca not in html
 
     def test_la_ficha_usa_la_misma_referencia(self, cliente) -> None:
+        toca, no_toca = self._esperado("jugador")
         html = _texto(cliente.get("/jugador/10"))
-        assert "la media global (todas las ligas)" in html
-        assert "media de su liga" not in html
+        assert toca in html
+        assert no_toca not in html
 
     def test_la_tabla_de_rasgos_tambien(self, cliente) -> None:
         """El macro se importa `with context`: sin eso el rotulo se quedaba fijo."""
         html = _texto(cliente.get("/jugador/10"))
-        assert (
-            'title="Desviaciones típicas respecto a la media global '
-            '(todas las ligas)"' in html
-        )
+        assert f'title="Desviaciones típicas respecto a {self.POR_LIGA}"' in html
 
 
 class TestApiValoresReales:
@@ -393,7 +464,7 @@ class TestApiValoresReales:
                 "texto_referencia", "texto_candidato"} <= set(co)
 
     def test_sin_bd_los_valores_reales_son_null(self, app_sin_bd) -> None:
-        rasgo = app_sin_bd.test_client().get(
+        rasgo = cliente_autenticado(app_sin_bd).get(
             "/api/ficha/jugador/10"
         ).get_json()["destacados"][0]
         assert rasgo["crudo"] is None
@@ -514,8 +585,9 @@ class TestApiFicha:
 
 class TestApiSugerencias:
     def test_devuelve_las_coincidencias(self, cliente) -> None:
+        """«Marc Garcia» está en el modelo y no en la BD: no se ofrece."""
         datos = cliente.get("/api/sugerencias?entidad=jugador&q=garcia").get_json()
-        assert {s["nombre"] for s in datos["sugerencias"]} == {"Sergio Garcia", "Marc Garcia"}
+        assert {s["nombre"] for s in datos["sugerencias"]} == {"Sergio Garcia"}
 
     def test_incluye_id_y_ligas_legibles(self, cliente) -> None:
         datos = cliente.get("/api/sugerencias?entidad=jugador&q=messi").get_json()
@@ -525,10 +597,10 @@ class TestApiSugerencias:
         assert sugerencia["ligas_nombre"] == ["La Liga 2015/2016"]
 
     def test_el_equipo_desambigua_a_los_homonimos(self, cliente) -> None:
-        """Con dos "Garcia" en pantalla, el club es lo que los distingue."""
-        datos = cliente.get("/api/sugerencias?entidad=jugador&q=garcia").get_json()
-        equipos = {s["nombre"]: s["equipo"] for s in datos["sugerencias"]}
-        assert equipos == {"Sergio Garcia": "Sevilla", "Marc Garcia": None}
+        """Con dos "Nombre Repetido" en pantalla, el club es lo que los distingue."""
+        datos = cliente.get("/api/sugerencias?entidad=jugador&q=repetido").get_json()
+        equipos = {s["id"]: s["equipo"] for s in datos["sugerencias"]}
+        assert equipos == {50: "Real Madrid", 60: "Sevilla"}
 
     def test_la_sugerencia_trae_la_trayectoria_compuesta(self, cliente) -> None:
         datos = cliente.get("/api/sugerencias?entidad=jugador&q=suarez").get_json()
@@ -566,6 +638,9 @@ class TestApiSimilares:
             "variante": config_app.VARIANTE_BASE,
             "nombre": config_app.NOMBRE_BASE,
             "datos": config_app.VARIANTE_BASE,
+            # Con qué datos se entrenó y sobre cuáles se ha consultado: sin
+            # `?datos=`, los mismos.
+            "datos_consultados": config_app.VARIANTE_BASE,
             "formulacion": config_app.MODELO_BASE["jugador"][0],
             "normalizacion": config_app.MODELO_BASE["jugador"][1],
         }
@@ -579,9 +654,14 @@ class TestApiSimilares:
         assert scores == sorted(scores, reverse=True)
 
     def test_la_ambiguedad_es_300_con_los_candidatos(self, cliente) -> None:
-        r = cliente.get("/api/similares?entidad=jugador&nombre=Garcia")
+        r = cliente.get("/api/similares?entidad=jugador&nombre=Repetido")
         assert r.status_code == 300
         assert len(r.get_json()["candidatos"]) == 2
+
+    def test_quien_no_esta_en_la_bd_es_404_explicado(self, cliente) -> None:
+        r = cliente.get("/api/similares?entidad=jugador&id=40")
+        assert r.status_code == 404
+        assert "no tiene a este jugador" in r.get_json()["error"]
 
     def test_lo_inexistente_es_404(self, cliente) -> None:
         r = cliente.get("/api/similares?entidad=jugador&nombre=Cristiano")

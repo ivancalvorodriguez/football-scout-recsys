@@ -13,11 +13,32 @@
       <span>Scouting por similitud</span>
     </a>
     <p class="lema">Recomendador de jugadores y equipos con perfil parecido, sobre StatsBomb Open Data.</p>
+    {# El recomendador es público: la navegación no cambia con la sesión. «Datos
+       y modelos» se enseña siempre a propósito — es lo que hace falta cuenta, y
+       esconderlo dejaría al visitante sin saber que existe ni por qué
+       registrarse. Quien entre sin sesión acaba en el login, con vuelta. #}
     <nav class="navegacion">
       <a href="{{ url_for('web.inicio') }}">Buscar</a>
       <a href="{{ url_for('web.glosario_metricas') }}">Glosario</a>
       <a href="{{ url_for('datos.panel') }}">Datos y modelos</a>
     </nav>
+    {% if usuario %}
+      {# Salir es POST, no un enlace: con un GET, cualquier <img src="/logout">
+         de otra página echaría al usuario fuera. #}
+      <form class="sesion" method="post" action="{{ url_for('auth.logout') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <span class="sesion-usuario" title="Sesión iniciada como {{ usuario }}">
+          {{ usuario_nombre }}
+        </span>
+        <button type="submit" class="boton boton-secundario boton-menor">Salir</button>
+      </form>
+    {% else %}
+      <div class="sesion">
+        <a class="boton boton-secundario boton-menor"
+           href="{{ url_for('auth.login') }}">Iniciar sesión</a>
+        <a class="boton boton-menor" href="{{ url_for('auth.registro') }}">Registrarse</a>
+      </div>
+    {% endif %}
   </header>
 
   <main class="contenido">

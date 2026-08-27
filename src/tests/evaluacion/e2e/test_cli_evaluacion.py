@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from src.similitud import config as config_sim
 from src.tests.conftest import RAIZ_REPO, ejecutar_modulo
 
 pytestmark = [pytest.mark.e2e, pytest.mark.lento]
@@ -51,12 +52,19 @@ def ejecutar_barrido(*args: str, ejes: list = EJES) -> subprocess.CompletedProce
 
 @pytest.fixture(scope="module")
 def modelos(bd_sintetica: Path, tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
-    """Rejilla de equipo construida por CLI, tal como la dejaria un usuario."""
+    """Rejilla de equipo construida por CLI, tal como la dejaria un usuario.
+
+    Se construye en la geometria SERVIBLE, no en la que `build` trae por defecto:
+    `evaluar` mide los artefactos vigentes y por eso su `--distancias` sigue a
+    `similitud.config.DISTANCIA_SERVIBLE`. Con la euclidea, este fixture dejaria
+    en disco unos artefactos que el comando bajo prueba no buscaria.
+    """
     destino = tmp_path_factory.mktemp("modelos_eval_e2e")
     res = ejecutar_modulo(
         "src.similitud.build",
         "--db", str(bd_sintetica), "--out", str(destino),
         "--entidad", "equipo", "--formulacion", "ambas", "--normalizacion", "ambas",
+        "--distancia", config_sim.DISTANCIA_SERVIBLE,
     )
     assert res.returncode == 0, res.stderr
     return {"dir": destino}
@@ -306,8 +314,11 @@ class TestFiguras3d:
     def test_declara_los_ejes_y_su_escala(self, barrido: dict) -> None:
         res = ejecutar_modulo("src.evaluacion.figuras3d",
                               "--barrido", str(barrido["dir"]), "--sin-html")
-        assert "Ejes barridos:" in res.stdout
+        assert "Ejes barridos en la carpeta:" in res.stdout
         assert "Escala de los ejes:" in res.stdout
+        # Y, debajo, que ejes de esos le tocan a cada modelo: los de una
+        # formulacion no reconstruyen los modelos de la otra.
+        assert "pareja(s)" in res.stdout
 
     def test_sin_un_barrido_previo_el_error_lo_dice(self, tmp_path: Path) -> None:
         res = ejecutar_modulo("src.evaluacion.figuras3d", "--barrido", str(tmp_path))

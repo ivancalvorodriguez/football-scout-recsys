@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block titulo %}Entrar · Scouting por similitud{% endblock %}
+
+{% block contenido %}
+  <section class="panel panel-login">
+    <h1>Iniciar sesión</h1>
+    <p class="ayuda">
+      Buscar jugadores y equipos parecidos <strong>no necesita cuenta</strong>:
+      la sesión hace falta solo para
+      <a href="{{ url_for('datos.panel') }}">Datos y modelos</a>, que incorpora
+      partidos y entrena modelos en el servidor.
+    </p>
+
+    {# Mensaje único para «no existe» y «contraseña incorrecta»: distinguirlos
+       convertiría el formulario en un listado de qué cuentas hay. #}
+    {% if error %}
+      <p class="aviso">{{ error }}</p>
+    {% endif %}
+
+    <form class="formulario" method="post" action="{{ url_for('auth.login') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="siguiente" value="{{ siguiente }}">
+      <div class="campo campo-ancho">
+        <label for="usuario">Usuario</label>
+        <input type="text" id="usuario" name="usuario" required autofocus
+               autocomplete="username" autocapitalize="none" spellcheck="false"
+               value="{{ usuario_escrito if usuario_escrito is defined else '' }}">
+      </div>
+      <div class="campo campo-ancho">
+        <label for="contrasena">Contraseña</label>
+        <input type="password" id="contrasena" name="contrasena" required
+               autocomplete="current-password">
+      </div>
+      <div class="botonera">
+        <button class="boton" type="submit">Entrar</button>
+      </div>
+    </form>
+
+    <p class="apunte">
+      ¿No tienes cuenta? <a href="{{ url_for('auth.registro') }}">Créate una</a>.
+      O vuelve <a href="{{ url_for('web.inicio') }}">al buscador</a>, que funciona
+      sin ella.
+    </p>
+  </section>
+{% endblock %}

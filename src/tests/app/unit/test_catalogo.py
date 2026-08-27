@@ -20,6 +20,12 @@ from src.app.catalogo import (
 )
 from src.tests.app.conftest import VARIANTE_NOMBRE, VARIANTE_SLUG
 
+# Cuenta con la que se consultan los catalogos. Casi todo lo que hay aqui es
+# anterior a que hubiera usuarios y sigue valiendo igual: lo que se crea en un
+# `tmp_path` no tiene dueno apuntado, asi que es COMPARTIDO y se ve desde
+# cualquier cuenta. Lo que si cambia es que enumerar exige decir quien pregunta.
+USUARIO = "ana"
+
 # La pareja que sirve la app: jugador con una formulacion, equipo con otra.
 STEM_JUGADOR = ClaveModelo("jugador").stem
 STEM_EQUIPO = ClaveModelo("equipo").stem
@@ -44,7 +50,7 @@ class TestSlug:
 
 class TestDisponibles:
     def test_encuentra_la_pareja_de_cada_modelo(self, dir_modelos: Path) -> None:
-        claves = Catalogo(dir_modelos).disponibles()
+        claves = Catalogo(dir_modelos).disponibles(USUARIO)
         # 2 entidades x 2 modelos (el base y el reentrenado del fixture).
         assert len(claves) == 4
         assert ClaveModelo("jugador") in claves
@@ -52,43 +58,43 @@ class TestDisponibles:
 
     def test_ignora_las_combinaciones_que_no_sirve(self, dir_modelos: Path) -> None:
         """En la raiz estan las 8 que construye `build`; se sirven 2 por modelo."""
-        base = [c for c in Catalogo(dir_modelos).disponibles() if c.es_base]
+        base = [c for c in Catalogo(dir_modelos).disponibles(USUARIO) if c.es_base]
         assert {(c.entidad, c.formulacion, c.normalizacion) for c in base} == {
             ("jugador", *config_app.MODELO_BASE["jugador"]),
             ("equipo", *config_app.MODELO_BASE["equipo"]),
         }
 
     def test_un_directorio_inexistente_no_rompe(self, tmp_path: Path) -> None:
-        assert Catalogo(tmp_path / "no_existe").disponibles() == []
+        assert Catalogo(tmp_path / "no_existe").disponibles(USUARIO) == []
 
     def test_ignora_un_npz_sin_su_json(self, tmp_path: Path, dir_modelos: Path) -> None:
         """Sin el JSON no hay nombres de entidad: el modelo no es consultable."""
         shutil.copy(dir_modelos / f"{STEM_JUGADOR}.npz", tmp_path)
-        assert Catalogo(tmp_path).disponibles() == []
+        assert Catalogo(tmp_path).disponibles(USUARIO) == []
 
     def test_ignora_ficheros_ajenos(self, tmp_path: Path) -> None:
         (tmp_path / "formulacion9_marciano_global.npz").write_bytes(b"")
         (tmp_path / "formulacion9_marciano_global.json").write_text("{}")
         (tmp_path / "notas.txt").write_text("nada")
-        assert Catalogo(tmp_path).disponibles() == []
+        assert Catalogo(tmp_path).disponibles(USUARIO) == []
 
     def test_entidades_disponibles(self, dir_modelos: Path) -> None:
-        assert Catalogo(dir_modelos).entidades_disponibles() == ["jugador", "equipo"]
+        assert Catalogo(dir_modelos).entidades_disponibles(USUARIO) == ["jugador", "equipo"]
 
     def test_opciones_filtra_por_entidad(self, dir_modelos: Path) -> None:
-        opciones = Catalogo(dir_modelos).opciones("equipo")
+        opciones = Catalogo(dir_modelos).opciones("equipo", USUARIO)
         assert opciones and all(c.entidad == "equipo" for c in opciones)
 
 
 class TestVariantes:
     def test_el_base_va_primero(self, dir_modelos: Path) -> None:
         """El desplegable tiene que abrir siempre por el modelo de fabrica."""
-        variantes = Catalogo(dir_modelos).variantes()
+        variantes = Catalogo(dir_modelos).variantes(USUARIO)
         assert variantes[0].slug == config_app.VARIANTE_BASE
         assert variantes[0].es_base
 
     def test_la_reentrenada_trae_su_nombre_y_su_fecha(self, dir_modelos: Path) -> None:
-        v = Catalogo(dir_modelos).variante(VARIANTE_SLUG)
+        v = Catalogo(dir_modelos).variante(VARIANTE_SLUG, USUARIO)
         assert v.nombre == VARIANTE_NOMBRE
         assert v.origen == config_app.VARIANTE_BASE
         assert v.fecha is not None and v.fecha.year == 2026
@@ -101,7 +107,7 @@ class TestVariantes:
         carpeta = tmp_path / config_app.SUBDIR_VARIANTES / "a-mano"
         _copiar(dir_modelos, carpeta, STEM_JUGADOR)
         (carpeta / config_app.FICHERO_VARIANTE).write_text("{ roto", encoding="utf-8")
-        v = Catalogo(tmp_path).variante("a-mano")
+        v = Catalogo(tmp_path).variante("a-mano", USUARIO)
         assert v.nombre == "a-mano" and v.entidades == ("jugador",)
 
     def test_una_carpeta_sin_artefactos_se_lista_pero_no_se_sirve(
@@ -111,9 +117,9 @@ class TestVariantes:
         buscador no lo ofrece."""
         (tmp_path / config_app.SUBDIR_VARIANTES / "a-medias").mkdir(parents=True)
         catalogo = Catalogo(tmp_path)
-        v = catalogo.variante("a-medias")
+        v = catalogo.variante("a-medias", USUARIO)
         assert v.entidades == () and not v.completo
-        assert catalogo.disponibles() == []
+        assert catalogo.disponibles(USUARIO) == []
 
     def test_variantes_de_una_entidad(self, tmp_path: Path, dir_modelos: Path) -> None:
         """Un modelo a medio reentrenar solo aparece en la entidad que ya cubre."""
@@ -122,25 +128,25 @@ class TestVariantes:
         carpeta = tmp_path / config_app.SUBDIR_VARIANTES / "solo-jugador"
         _copiar(dir_modelos, carpeta, STEM_JUGADOR)
         catalogo = Catalogo(tmp_path)
-        assert [v.slug for v in catalogo.variantes_de("jugador")] == ["base", "solo-jugador"]
-        assert [v.slug for v in catalogo.variantes_de("equipo")] == ["base"]
+        assert [v.slug for v in catalogo.variantes_de("jugador", USUARIO)] == ["base", "solo-jugador"]
+        assert [v.slug for v in catalogo.variantes_de("equipo", USUARIO)] == ["base"]
 
     def test_un_slug_inventado(self, dir_modelos: Path) -> None:
         with pytest.raises(ModeloNoDisponible):
-            Catalogo(dir_modelos).variante("fantasma")
+            Catalogo(dir_modelos).variante("fantasma", USUARIO)
 
 
 class TestResolver:
     def test_sin_modelo_pedido_sirve_el_base(self, dir_modelos: Path) -> None:
-        assert Catalogo(dir_modelos).resolver("jugador") == ClaveModelo("jugador")
+        assert Catalogo(dir_modelos).resolver("jugador", USUARIO) == ClaveModelo("jugador")
 
     def test_respeta_el_modelo_pedido(self, dir_modelos: Path) -> None:
-        clave = Catalogo(dir_modelos).resolver("equipo", variante=VARIANTE_SLUG)
+        clave = Catalogo(dir_modelos).resolver("equipo", USUARIO, variante=VARIANTE_SLUG)
         assert clave == ClaveModelo("equipo", VARIANTE_SLUG)
 
     def test_la_receta_la_fija_la_entidad(self, dir_modelos: Path) -> None:
         """El usuario elige modelo; con que se construye cada entidad, no."""
-        clave = Catalogo(dir_modelos).resolver("jugador", variante=VARIANTE_SLUG)
+        clave = Catalogo(dir_modelos).resolver("jugador", USUARIO, variante=VARIANTE_SLUG)
         assert (clave.formulacion, clave.normalizacion) == config_app.MODELO_BASE["jugador"]
 
     def test_sin_base_se_sirve_el_primero_que_haya(
@@ -149,11 +155,11 @@ class TestResolver:
         """Con la raiz vacia y un modelo con nombre, la app tiene que servir ese."""
         carpeta = tmp_path / config_app.SUBDIR_VARIANTES / "unico"
         _copiar(dir_modelos, carpeta, STEM_JUGADOR)
-        assert Catalogo(tmp_path).resolver("jugador").variante == "unico"
+        assert Catalogo(tmp_path).resolver("jugador", USUARIO).variante == "unico"
 
     def test_sin_modelos_de_esa_entidad(self, tmp_path: Path) -> None:
         with pytest.raises(ModeloNoDisponible, match="build"):
-            Catalogo(tmp_path).resolver("jugador")
+            Catalogo(tmp_path).resolver("jugador", USUARIO)
 
     def test_un_modelo_que_no_cubre_esa_entidad(
         self, tmp_path: Path, dir_modelos: Path
@@ -163,7 +169,7 @@ class TestResolver:
         carpeta = tmp_path / config_app.SUBDIR_VARIANTES / "solo-jugador"
         _copiar(dir_modelos, carpeta, STEM_JUGADOR)
         with pytest.raises(ModeloNoDisponible, match="artefacto de equipo"):
-            Catalogo(tmp_path).resolver("equipo", variante="solo-jugador")
+            Catalogo(tmp_path).resolver("equipo", USUARIO, variante="solo-jugador")
 
 
 class TestObtener:
@@ -209,7 +215,7 @@ class TestObtener:
 class TestCrearVariante:
     def test_reserva_la_carpeta_y_deja_sus_metadatos(self, tmp_path: Path) -> None:
         catalogo = Catalogo(tmp_path)
-        nueva = catalogo.crear_variante("Con la Bundesliga", origen="base")
+        nueva = catalogo.crear_variante("Con la Bundesliga", USUARIO, origen="base")
         assert nueva.slug == "con-la-bundesliga"
         carpeta = catalogo.dir_modelo(nueva.slug)
         assert carpeta.is_dir()
@@ -219,25 +225,25 @@ class TestCrearVariante:
     def test_el_modelo_nuevo_es_el_destino_del_reentrenamiento(self, tmp_path: Path) -> None:
         """La carpeta existe antes de entrenar: es el `--out` del comando."""
         catalogo = Catalogo(tmp_path)
-        nueva = catalogo.crear_variante("Prueba")
+        nueva = catalogo.crear_variante("Prueba", USUARIO)
         assert catalogo.dir_modelo(nueva.slug).exists()
         # Y hasta que el entrenamiento deje artefactos, no se sirve.
-        assert catalogo.opciones_de_variante(nueva.slug) == []
+        assert catalogo.opciones_de_variante(nueva.slug, USUARIO) == []
 
     def test_un_nombre_repetido_se_rechaza(self, tmp_path: Path) -> None:
         catalogo = Catalogo(tmp_path)
-        catalogo.crear_variante("Prueba")
+        catalogo.crear_variante("Prueba", USUARIO)
         with pytest.raises(NombreInvalido, match="Ya hay"):
-            catalogo.crear_variante("prueba")     # mismo slug
+            catalogo.crear_variante("prueba", USUARIO)     # mismo slug
 
     @pytest.mark.parametrize("nombre", ["", "   ", "¿?"])
     def test_un_nombre_vacio_se_rechaza(self, tmp_path: Path, nombre: str) -> None:
         with pytest.raises(NombreInvalido):
-            Catalogo(tmp_path).crear_variante(nombre)
+            Catalogo(tmp_path).crear_variante(nombre, USUARIO)
 
     def test_no_se_puede_llamar_como_el_de_fabrica(self, tmp_path: Path) -> None:
         with pytest.raises(NombreInvalido, match="fábrica"):
-            Catalogo(tmp_path).crear_variante("Base")
+            Catalogo(tmp_path).crear_variante("Base", USUARIO)
 
 
 class TestClaveModelo:

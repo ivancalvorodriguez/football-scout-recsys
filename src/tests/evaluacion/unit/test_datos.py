@@ -107,3 +107,34 @@ class TestTerciles:
     def test_los_nombres_cubren_las_tres_etiquetas(self) -> None:
         assert set(datos.NOMBRE_TERCIL) == {0, 1, 2}
         assert datos.NOMBRE_TERCIL[2] == "cabeza"
+
+
+class TestBaseDeDatosDeEntrenamiento:
+    """Donde vive la BD de experimentacion, y por que no puede vivir en otro sitio.
+
+    Es una invariante de PRODUCTO, no un detalle de rutas: la app enumera
+    `outputs/db/conjuntos/` y sirve lo que encuentre ahi, asi que meter la BD de
+    entrenamiento en esa carpeta la convertiria en un conjunto compartido con
+    todas las cuentas — y el buscador ofreceria 284 jugadores de una liga que el
+    modelo servido no conoce. Un refactor de rutas puede romper esto sin que
+    ninguna otra prueba se entere.
+    """
+
+    def test_no_cae_donde_la_app_enumera_los_conjuntos(self) -> None:
+        from src.app import config as config_app
+
+        entrenamiento = config.DB_ENTRENAMIENTO.resolve()
+        carpeta_app = (config.DEFAULT_DB_PATH.parent
+                       / config_app.SUBDIR_CONJUNTOS).resolve()
+        assert carpeta_app not in entrenamiento.parents
+
+    def test_es_distinta_de_la_que_sirve_la_app(self) -> None:
+        assert config.DB_ENTRENAMIENTO != config.DEFAULT_DB_PATH
+
+    def test_no_es_el_default_de_ningun_comando(self) -> None:
+        """Un `build` o un `evaluar` por descuido no pueden salir sobre ella: sus
+        artefactos cubririan un universo distinto del que sirve la app."""
+        from src.similitud import config as config_similitud
+
+        assert config.DEFAULT_DB_PATH != config.DB_ENTRENAMIENTO
+        assert config_similitud.DEFAULT_DB_PATH != config.DB_ENTRENAMIENTO

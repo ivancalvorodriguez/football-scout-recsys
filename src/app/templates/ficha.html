@@ -14,6 +14,19 @@
       id {{ ficha.entidad.id }}
     </p>
 
+    {# Su perfil y sus puntos fuertes son tan reales como los de cualquiera (el
+       vector sale de las mismas métricas y las mismas mu/sd); lo que no tiene es
+       fila en la matriz, y eso solo afecta a las recomendaciones. #}
+    {% if ficha.proyectada %}
+      <p class="aviso aviso-proyectada">
+        <strong>Fuera del modelo.</strong>
+        {{ ficha.entidad.nombre }} está en la base de datos
+        {%- if conjunto %} «{{ conjunto.nombre }}»{% endif %} pero no en este
+        modelo. El perfil de abajo sale de sus propias métricas; sus similares se
+        calculan colocándolo en el modelo al vuelo.
+      </p>
+    {% endif %}
+
     {% if entidad == 'jugador' and datos_bd and datos_bd.militancias %}
       {# Detalle cronológico, con lo que aporta cada etapa. #}
       <ul class="trayectoria">
@@ -34,6 +47,7 @@
       <a class="boton"
          href="{{ url_for('web.similares', entidad=entidad, id=ficha.entidad.id,
                           modelo=clave.variante if clave else none,
+                          datos=conjunto.slug if conjunto else none,
                           k=k) }}">
         Ver {{ etiqueta_plural[entidad] }} similares
       </a>

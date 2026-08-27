@@ -1,0 +1,83 @@
+{
+  "celda": {
+    "distancia": "manhattan",
+    "entidad": "equipo",
+    "formulacion": "5",
+    "normalizacion": "global"
+  },
+  "codigo": "cdfb77f4c7df54f17988a55487bffd71b5222f400d2023587323662a160f076e",
+  "datos": {
+    "bytes": 12861440,
+    "mtime_ns": 1786622177514969900
+  },
+  "excluir_ligas": [
+    "1238-108"
+  ],
+  "hiperparametros": {
+    "F5_EASE_LAMBDA": 0.03,
+    "F5_METODO_EQUIPO": "mmd",
+    "F5_RFF_DIM": 1216,
+    "F5_RFF_SEED": 20240714,
+    "F5_SINKHORN_ITERS": 100,
+    "F5_SINKHORN_REG": 0.5,
+    "F_CLIP_Z": 6.0,
+    "TEAM_COUNT_FEATURES": [
+      "passes",
+      "passes_completed",
+      "ten_plus_pass_sequences",
+      "progressive_passes",
+      "passes_into_final_third",
+      "xt",
+      "sca",
+      "gca",
+      "passes_into_penalty_area",
+      "open_play_xg",
+      "build_up_attacks",
+      "shots",
+      "np_shots",
+      "goals",
+      "shots_on_target",
+      "xg",
+      "npxg",
+      "high_turnovers",
+      "pressures",
+      "counterpressures",
+      "direct_attacks",
+      "open_play_sequences"
+    ],
+    "TEAM_DIFF_FEATURES": [
+      [
+        "goals_minus_xg",
+        "goals",
+        "xg"
+      ]
+    ],
+    "TEAM_RATE_FEATURES": [
+      "possession_pct",
+      "ppda",
+      "field_tilt",
+      "absolute_width",
+      "sequence_start_distance",
+      "direct_speed",
+      "passes_per_sequence"
+    ],
+    "TEAM_RATIO_FEATURES": [
+      [
+        "pass_completion_pct",
+        "passes_completed",
+        "passes"
+      ],
+      [
+        "xg_per_shot",
+        "xg",
+        "shots"
+      ],
+      [
+        "sot_pct",
+        "shots_on_target",
+        "np_shots"
+      ]
+    ]
+  },
+  "version": 1
+}

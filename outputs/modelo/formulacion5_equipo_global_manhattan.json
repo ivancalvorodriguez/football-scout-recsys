@@ -1,0 +1,571 @@
+{
+  "formulacion": "5",
+  "entidad": "equipo",
+  "entity_names": [
+    "Arsenal",
+    "Leicester City",
+    "Watford",
+    "Liverpool",
+    "Southampton",
+    "Swansea City",
+    "West Bromwich Albion",
+    "AFC Bournemouth",
+    "Everton",
+    "Stoke City",
+    "Crystal Palace",
+    "Chelsea",
+    "Manchester City",
+    "Newcastle United",
+    "Tottenham Hotspur",
+    "Manchester United",
+    "West Ham United",
+    "Sunderland",
+    "Norwich City",
+    "Aston Villa",
+    "AS Monaco",
+    "Toulouse",
+    "Paris Saint-Germain",
+    "Troyes",
+    "Rennes",
+    "Saint-Étienne",
+    "OGC Nice",
+    "Lyon",
+    "Montpellier",
+    "Caen",
+    "Guingamp",
+    "Lille",
+    "Nantes",
+    "Angers",
+    "Bordeaux",
+    "Marseille",
+    "Stade de Reims",
+    "Gazélec Ajaccio",
+    "Lorient",
+    "Bayern Munich",
+    "Hamburger SV",
+    "Augsburg",
+    "Hertha Berlin",
+    "VfB Stuttgart",
+    "Hoffenheim",
+    "Werder Bremen",
+    "FSV Mainz 05",
+    "Hannover 96",
+    "Wolfsburg",
+    "Borussia Dortmund",
+    "Schalke 04",
+    "Eintracht Frankfurt",
+    "Borussia Mönchengladbach",
+    "FC Köln",
+    "Ingolstadt",
+    "Valencia",
+    "Las Palmas",
+    "Celta Vigo",
+    "Real Sociedad",
+    "Atlético Madrid",
+    "Sevilla",
+    "Espanyol",
+    "Athletic Club",
+    "Getafe",
+    "Barcelona",
+    "Real Betis",
+    "RC Deportivo La Coruña",
+    "Real Madrid",
+    "Levante UD",
+    "Villarreal",
+    "Málaga",
+    "Juventus",
+    "Hellas Verona",
+    "Napoli",
+    "Atalanta",
+    "AS Roma",
+    "Udinese",
+    "Chievo",
+    "Sassuolo",
+    "Genoa",
+    "Sampdoria",
+    "Lazio",
+    "Inter Milan",
+    "Fiorentina",
+    "Bologna",
+    "Torino",
+    "AC Milan",
+    "Empoli",
+    "Frosinone",
+    "Eibar",
+    "Rayo Vallecano",
+    "Darmstadt 98",
+    "Bayer Leverkusen",
+    "Sporting Gijón",
+    "Granada",
+    "Carpi",
+    "Palermo",
+    "Bastia"
+  ],
+  "feat_names": [
+    "passes",
+    "passes_completed",
+    "ten_plus_pass_sequences",
+    "progressive_passes",
+    "passes_into_final_third",
+    "xt",
+    "sca",
+    "gca",
+    "passes_into_penalty_area",
+    "open_play_xg",
+    "build_up_attacks",
+    "shots",
+    "np_shots",
+    "goals",
+    "shots_on_target",
+    "xg",
+    "npxg",
+    "high_turnovers",
+    "pressures",
+    "counterpressures",
+    "direct_attacks",
+    "open_play_sequences",
+    "possession_pct",
+    "ppda",
+    "field_tilt",
+    "absolute_width",
+    "sequence_start_distance",
+    "direct_speed",
+    "passes_per_sequence",
+    "pass_completion_pct",
+    "xg_per_shot",
+    "sot_pct",
+    "goals_minus_xg"
+  ],
+  "meta": {
+    "n_observaciones": 3646,
+    "n_entidades": 98,
+    "metodo_distribucional": "mmd",
+    "ease_lambda": 0.03,
+    "rff_dim": 1216,
+    "sinkhorn_reg": null,
+    "normalizacion": "global",
+    "distancia": "manhattan",
+    "ligas_por_entidad": {
+      "1": [
+        "2-27"
+      ],
+      "22": [
+        "2-27"
+      ],
+      "23": [
+        "2-27"
+      ],
+      "24": [
+        "2-27"
+      ],
+      "25": [
+        "2-27"
+      ],
+      "26": [
+        "2-27"
+      ],
+      "27": [
+        "2-27"
+      ],
+      "28": [
+        "2-27"
+      ],
+      "29": [
+        "2-27"
+      ],
+      "30": [
+        "2-27"
+      ],
+      "31": [
+        "2-27"
+      ],
+      "33": [
+        "2-27"
+      ],
+      "36": [
+        "2-27"
+      ],
+      "37": [
+        "2-27"
+      ],
+      "38": [
+        "2-27"
+      ],
+      "39": [
+        "2-27"
+      ],
+      "40": [
+        "2-27"
+      ],
+      "41": [
+        "2-27"
+      ],
+      "56": [
+        "2-27"
+      ],
+      "59": [
+        "2-27"
+      ],
+      "129": [
+        "7-27"
+      ],
+      "130": [
+        "7-27"
+      ],
+      "131": [
+        "7-27"
+      ],
+      "133": [
+        "7-27"
+      ],
+      "134": [
+        "7-27"
+      ],
+      "135": [
+        "7-27"
+      ],
+      "136": [
+        "7-27"
+      ],
+      "137": [
+        "7-27"
+      ],
+      "139": [
+        "7-27"
+      ],
+      "140": [
+        "7-27"
+      ],
+      "142": [
+        "7-27"
+      ],
+      "143": [
+        "7-27"
+      ],
+      "144": [
+        "7-27"
+      ],
+      "145": [
+        "7-27"
+      ],
+      "146": [
+        "7-27"
+      ],
+      "147": [
+        "7-27"
+      ],
+      "156": [
+        "7-27"
+      ],
+      "160": [
+        "7-27"
+      ],
+      "165": [
+        "7-27"
+      ],
+      "169": [
+        "9-27"
+      ],
+      "171": [
+        "9-27"
+      ],
+      "172": [
+        "9-27"
+      ],
+      "173": [
+        "9-27"
+      ],
+      "174": [
+        "9-27"
+      ],
+      "175": [
+        "9-27"
+      ],
+      "176": [
+        "9-27"
+      ],
+      "177": [
+        "9-27"
+      ],
+      "178": [
+        "9-27"
+      ],
+      "179": [
+        "9-27"
+      ],
+      "180": [
+        "9-27"
+      ],
+      "181": [
+        "9-27"
+      ],
+      "184": [
+        "9-27"
+      ],
+      "185": [
+        "9-27"
+      ],
+      "186": [
+        "9-27"
+      ],
+      "189": [
+        "9-27"
+      ],
+      "207": [
+        "11-27"
+      ],
+      "208": [
+        "11-27"
+      ],
+      "209": [
+        "11-27"
+      ],
+      "210": [
+        "11-27"
+      ],
+      "212": [
+        "11-27"
+      ],
+      "213": [
+        "11-27"
+      ],
+      "214": [
+        "11-27"
+      ],
+      "215": [
+        "11-27"
+      ],
+      "216": [
+        "11-27"
+      ],
+      "217": [
+        "11-27"
+      ],
+      "218": [
+        "11-27"
+      ],
+      "219": [
+        "11-27"
+      ],
+      "220": [
+        "11-27"
+      ],
+      "221": [
+        "11-27"
+      ],
+      "222": [
+        "11-27"
+      ],
+      "223": [
+        "11-27"
+      ],
+      "224": [
+        "12-27"
+      ],
+      "226": [
+        "12-27"
+      ],
+      "227": [
+        "12-27"
+      ],
+      "228": [
+        "12-27"
+      ],
+      "229": [
+        "12-27"
+      ],
+      "230": [
+        "12-27"
+      ],
+      "231": [
+        "12-27"
+      ],
+      "232": [
+        "12-27"
+      ],
+      "233": [
+        "12-27"
+      ],
+      "234": [
+        "12-27"
+      ],
+      "236": [
+        "12-27"
+      ],
+      "238": [
+        "12-27"
+      ],
+      "239": [
+        "12-27"
+      ],
+      "240": [
+        "12-27"
+      ],
+      "241": [
+        "12-27"
+      ],
+      "243": [
+        "12-27"
+      ],
+      "290": [
+        "12-27"
+      ],
+      "291": [
+        "12-27"
+      ],
+      "322": [
+        "11-27"
+      ],
+      "360": [
+        "11-27"
+      ],
+      "872": [
+        "9-27"
+      ],
+      "904": [
+        "9-27"
+      ],
+      "1041": [
+        "11-27"
+      ],
+      "1049": [
+        "11-27"
+      ],
+      "1683": [
+        "12-27"
+      ],
+      "2256": [
+        "12-27"
+      ],
+      "2736": [
+        "7-27"
+      ]
+    },
+    "warm": {
+      "aplicado": false,
+      "motivo": "no hay estado previo",
+      "sigma_congelado": false,
+      "pares_ot_reutilizados": 0,
+      "observaciones": 3646,
+      "observaciones_reutilizadas": 0,
+      "observaciones_intactas": 0,
+      "observaciones_nuevas": 3646,
+      "entidades": 98,
+      "entidades_nuevas": 98,
+      "entidades_intactas": 0
+    },
+    "estadisticas_normalizacion": {
+      "normalizacion": "global",
+      "columnas": [
+        "passes",
+        "passes_completed",
+        "ten_plus_pass_sequences",
+        "progressive_passes",
+        "passes_into_final_third",
+        "xt",
+        "sca",
+        "gca",
+        "passes_into_penalty_area",
+        "open_play_xg",
+        "build_up_attacks",
+        "shots",
+        "np_shots",
+        "goals",
+        "shots_on_target",
+        "xg",
+        "npxg",
+        "high_turnovers",
+        "pressures",
+        "counterpressures",
+        "direct_attacks",
+        "open_play_sequences",
+        "possession_pct",
+        "ppda",
+        "field_tilt",
+        "absolute_width",
+        "sequence_start_distance",
+        "direct_speed",
+        "passes_per_sequence",
+        "pass_completion_pct",
+        "xg_per_shot",
+        "sot_pct",
+        "goals_minus_xg"
+      ],
+      "mu": {
+        "__global__": [
+          487.49643444871094,
+          373.2816785518376,
+          4.462424574876577,
+          37.38398244651673,
+          28.716401535929787,
+          1.9336687438288536,
+          21.148107515085023,
+          2.133022490400439,
+          7.2361492046077895,
+          1.1282993609434997,
+          2.1985737794843665,
+          12.539495337356007,
+          12.406198573779484,
+          1.2907295666483818,
+          4.154415798134942,
+          1.2555128469555676,
+          1.1510748326933626,
+          13.324739440482722,
+          163.51590784421285,
+          58.546900713110254,
+          7.57707076247943,
+          41.25479978058146,
+          0.5,
+          16.007177474358002,
+          0.5,
+          56.51872380691168,
+          35.09730197476687,
+          3.402421969281405,
+          4.280942359889905,
+          0.7512482238737297,
+          0.09989638263475702,
+          0.33900897715406075,
+          0.035216719692814036
+        ]
+      },
+      "sd": {
+        "__global__": [
+          119.71082300577358,
+          122.31436359866835,
+          3.542174092701474,
+          10.906127460066966,
+          11.69568372859669,
+          0.7236472018341868,
+          9.13202399793812,
+          2.2166331337979086,
+          4.089833116953427,
+          0.6924066102571627,
+          2.1829534930295535,
+          5.074102896679822,
+          5.0346963991001,
+          1.2194513594375982,
+          2.3617021057782033,
+          0.7701286360088755,
+          0.6947802632922606,
+          5.30138072097023,
+          40.37675890560834,
+          13.808198332505693,
+          3.735121998745662,
+          7.911057465722087,
+          0.11720852447959305,
+          7.266718915867353,
+          0.153539573557305,
+          3.2872408602179655,
+          4.20731362371343,
+          0.6190515844146439,
+          1.3718143602979618,
+          0.07216911695038024,
+          0.04844106441940162,
+          0.1572175124878516,
+          0.9734349868226561
+        ]
+      }
+    },
+    "descripcion": "Etapa 1 similitud distribucional (mmd, distancia manhattan) sobre las nubes de observaciones + etapa 2 EASE (SLIM cerrado) de re-ranking."
+  }
+}

@@ -33,8 +33,8 @@ def contar_contextos(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     """Sustituye la construccion del contexto por un contador de llamadas."""
     creados: list[tuple[str, str]] = []
 
-    def falso(db_path, entidad, normalizacion):
-        creados.append((entidad, normalizacion))
+    def falso(db_path, entidad, normalizacion, excluir_ligas=(), **kwargs):
+        creados.append((entidad, normalizacion, tuple(excluir_ligas)))
         return ContextoFalso(entidad, normalizacion)
 
     monkeypatch.setattr(construccion, "crear_contexto", falso)
@@ -51,7 +51,20 @@ class TestCelda:
         assert celda.stem == "formulacion5_jugador_global"
 
     def test_la_etiqueta_identifica_al_modelo_en_el_log(self) -> None:
-        assert trabajo.Celda("2", "equipo", "por_liga").etiqueta == "F2_equipo_por_liga"
+        assert (trabajo.Celda("2", "equipo", "por_liga").etiqueta
+                == "F2_equipo_por_liga_euclidea")
+
+    def test_el_stem_calla_la_euclidea_pero_la_etiqueta_no(self) -> None:
+        """En disco la euclidea no lleva sufijo (para no renombrar lo ya
+        construido); en un resultado la geometria se declara siempre."""
+        celda = trabajo.Celda("2", "equipo", "por_liga")
+        assert celda.stem == "formulacion2_equipo_por_liga"
+        assert celda.etiqueta.endswith("_euclidea")
+
+    def test_otra_distancia_si_va_en_el_nombre_del_artefacto(self) -> None:
+        """Sin sufijo pisaria el artefacto euclideo con otra geometria."""
+        celda = trabajo.Celda("2", "equipo", "por_liga", "manhattan")
+        assert celda.stem == "formulacion2_equipo_por_liga_manhattan"
 
     def test_es_hashable_y_ordenable(self) -> None:
         """Se usa como clave de diccionario al repartir resultados por celda."""
@@ -120,7 +133,7 @@ class TestCacheDeContextos:
         bd = tmp_path / "scouting.db"
         trabajo.contexto(bd, trabajo.Celda("2", "equipo", "global"))
         trabajo.contexto(bd, trabajo.Celda("5", "equipo", "global"))
-        assert contar_contextos == [("equipo", "global")]
+        assert contar_contextos == [("equipo", "global", ())]
 
     def test_otra_normalizacion_es_otro_contexto(
         self, contar_contextos: list, tmp_path: Path
@@ -185,3 +198,55 @@ class TestCacheDeLaW:
         ctx._W = ("W ajustada",)
         trabajo.contexto(bd, trabajo.Celda("5", "equipo", "global"))
         assert ctx._W == ("W ajustada",)
+
+
+class TestHoldoutEnLaConstruccion:
+    """Con `--holdout`, el artefacto se ajusta sin esas ligas — y todo lo demas
+    tiene que seguirle.
+
+    Son tres piezas que se pueden desincronizar en silencio: el ajuste, el
+    contexto desde el que las fases reconstruyen la S, y la huella con la que la
+    cache decide si un artefacto vale. Si el contexto trajera las 6 ligas y el
+    artefacto solo 5, las fases compararian matrices de distinto tamaño; si la
+    huella no distinguiera, una ejecucion sin hold-out reutilizaria artefactos con
+    hold-out (o al reves) y las metricas describirian otro modelo.
+    """
+
+    def test_el_contexto_excluye_las_mismas_ligas(
+        self, contar_contextos: list, tmp_path: Path
+    ) -> None:
+        trabajo.contexto(tmp_path / "scouting.db",
+                         trabajo.Celda("5", "equipo", "global"),
+                         excluir_ligas=("1238-108",))
+        assert contar_contextos == [("equipo", "global", ("1238-108",))]
+
+    def test_es_otro_contexto_que_el_de_la_bd_entera(
+        self, contar_contextos: list, tmp_path: Path
+    ) -> None:
+        """No se puede reutilizar el de la ejecucion sin hold-out: tiene mas
+        entidades y otras mu/sd."""
+        bd = tmp_path / "scouting.db"
+        celda = trabajo.Celda("5", "equipo", "global")
+        trabajo.contexto(bd, celda)
+        trabajo.contexto(bd, celda, excluir_ligas=("1238-108",))
+        assert len(contar_contextos) == 2
+
+    def test_la_huella_distingue_el_hold_out(self, tmp_path: Path) -> None:
+        from src.evaluacion import huella
+
+        bd = tmp_path / "scouting.db"
+        bd.write_bytes(b"")
+        con = huella.calcular("5", "equipo", "global", bd,
+                              excluir_ligas=("1238-108",))
+        sin = huella.calcular("5", "equipo", "global", bd)
+        assert con != sin
+        assert con["excluir_ligas"] == ["1238-108"]
+
+    def test_el_orden_de_las_ligas_no_cambia_la_huella(self, tmp_path: Path) -> None:
+        """`--holdout a,b` y `--holdout b,a` son el mismo experimento."""
+        from src.evaluacion import huella
+
+        bd = tmp_path / "scouting.db"
+        bd.write_bytes(b"")
+        assert (huella.calcular("5", "equipo", "global", bd, ("a", "b"))
+                == huella.calcular("5", "equipo", "global", bd, ("b", "a")))

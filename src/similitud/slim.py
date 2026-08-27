@@ -7,19 +7,31 @@ glmnet/Friedman-Hastie-Tibshirani 2010).
 Contiene:
 - `elasticnet_no_negativo`: regresion dispersa L1+L2 con w>=0 por coordenadas,
   el ladrillo comun de SLIM (una columna) y de la variante feature-space.
-- `vecinos_mas_cercanos`: seleccion de candidatos tipo fsSLIM (kNN euclideo) que
-  hace tratable la W (M x M) de la Formulacion 2.
+- `elasticnet_residuo_l1`: la misma regresion con el residuo medido en norma 1
+  (IRLS sobre la anterior), que es lo que pide la distancia `manhattan`.
+- `vecinos_mas_cercanos`: seleccion de candidatos tipo fsSLIM (kNN) que hace
+  tratable la W (M x M) de la Formulacion 2.
 - `slim_instancia`: aprende W instancia-instancia (Formulacion 2). Reconstruye
   cada OBSERVACION como combinacion dispersa no-negativa de sus vecinas.
 - `agregar_W_a_entidades`: agrega los bloques de W a similitud entidad-entidad
   (la agregacion cae sobre los PESOS aprendidos, no sobre el input).
 - `ease`: SLIM de forma cerrada (Steck 2019) usado como capa de re-ranking en la
   Formulacion 5.
+
+**La distancia es un parametro.** Tanto la seleccion de vecinos como la norma del
+residuo salen de `src.similitud.distancias`: sin `espacio` (o con el euclideo)
+esto hace exactamente lo que hacia antes, y con otro se ajusta en su geometria.
+Ver el docstring de aquel modulo, sobre todo el invariante de transformar una
+sola vez: aqui `slim_instancia` es quien lo hace, y todo lo que llama despues
+trabaja ya sobre la matriz transformada.
 """
 
 from __future__ import annotations
 
 import numpy as np
+
+from . import distancias
+from .distancias import Espacio
 
 
 def elasticnet_no_negativo(
@@ -75,13 +87,75 @@ def elasticnet_no_negativo(
     return w
 
 
-def vecinos_mas_cercanos(X: np.ndarray, k: int) -> np.ndarray:
-    """Indices de los k vecinos euclideos mas cercanos de cada fila (sin la propia).
+def elasticnet_residuo_l1(
+    A: np.ndarray,
+    y: np.ndarray,
+    beta: float,
+    l1: float,
+    max_iter: int = 200,
+    tol: float = 1e-4,
+    w_init: np.ndarray | None = None,
+    iters_irls: int = distancias.IRLS_ITERS,
+    eps: float = distancias.IRLS_EPS,
+) -> np.ndarray:
+    """Resuelve  min_w ||y - A w||_1 + (beta/2)||w||^2 + l1*||w||_1,  w>=0.
+
+    Es `elasticnet_no_negativo` con el residuo medido en norma 1 en vez de en
+    norma 2, que es lo que significa ajustar con la distancia `manhattan`: el
+    residuo se mide en la misma metrica en la que se eligen los vecinos.
+
+    No hay actualizacion cerrada por coordenada para la norma 1, asi que se
+    resuelve por **IRLS** (iteratively reweighted least squares): |r| se mayoriza
+    con r^2/(2|r|), de modo que cada pasada es un minimo cuadrado PONDERADO con
+    pesos ``u_i = 1/max(|r_i|, eps)``, y eso ya lo sabe hacer el coordinate
+    descent de siempre sin tocarlo — basta con escalar las filas por sqrt(u).
+    Cada pasada arranca de la anterior, asi que las ultimas son casi gratis.
+
+    Dos consecuencias que conviene tener presentes:
+
+    - La solucion es ITERATIVA: converge (la mayorizacion no aumenta el
+      objetivo), pero a diferencia del caso euclideo no es el optimo exacto de
+      una funcion estrictamente convexa resuelta hasta `tol`.
+    - `beta` y `l1` quedan en OTRA escala efectiva, porque el termino de datos
+      pasa de cuadratico a lineal. Los valores afinados para la euclidea no son
+      directamente trasladables: hay que barrerlos de nuevo.
+    """
+    A = np.asarray(A, dtype=float)
+    y = np.asarray(y, dtype=float)
+    w = elasticnet_no_negativo(A, y, beta=beta, l1=l1, max_iter=max_iter,
+                               tol=tol, w_init=w_init)
+    for _ in range(max(0, iters_irls - 1)):
+        residual = y - A @ w
+        raiz_u = 1.0 / np.sqrt(np.maximum(np.abs(residual), eps))
+        nueva = elasticnet_no_negativo(
+            A * raiz_u[:, None], y * raiz_u,
+            beta=beta, l1=l1, max_iter=max_iter, tol=tol, w_init=w)
+        cambio = float(np.max(np.abs(nueva - w))) if nueva.size else 0.0
+        w = nueva
+        if cambio < tol:
+            break
+    return w
+
+
+def vecinos_mas_cercanos(
+    X: np.ndarray, k: int, espacio: Espacio | None = None
+) -> np.ndarray:
+    """Indices de los k vecinos mas cercanos de cada fila (sin la propia).
 
     Seleccion de candidatos estilo fsSLIM: cada observacion solo se reconstruye
     desde sus ~k vecinas, evitando resolver contra las M observaciones. Se calcula
     por bloques para no materializar la matriz M x M completa.
+
+    `X` tiene que venir YA en el espacio de la distancia (`Espacio.transformar`);
+    `espacio` solo dice con que metrica se mide ahi. Con None —o con cualquier
+    distancia que sea euclidea tras transformar: `euclidea`, `mahalanobis`,
+    `coseno`— se usa la via rapida de siempre, un unico producto de matrices por
+    bloque. La `manhattan` no tiene esa identidad y va por
+    `distancias.vecinos`, que mide fila a fila.
     """
+    if espacio is not None and not espacio.euclidea_transformada:
+        return distancias.vecinos(
+            espacio, X, X, k, propia=np.arange(X.shape[0], dtype=np.int64))
     M = X.shape[0]
     k = min(k, M - 1)
     sq = np.einsum("ij,ij->i", X, X)  # ||x_i||^2
@@ -107,6 +181,7 @@ def slim_instancia(
     tol: float = 1e-4,
     progreso=None,
     inicial=None,
+    espacio: Espacio | None = None,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Formulacion 2: aprende W (M x M) instancia-instancia.
 
@@ -128,9 +203,19 @@ def slim_instancia(
     ajuste anterior y los de ahora (las observaciones se renumeran al anadir
     partidos, y los vecinos de cada una pueden cambiar) es responsabilidad de
     quien lo pasa — aqui no se guarda estado de ejecuciones previas.
+
+    ``espacio`` es la DISTANCIA con la que se ajusta (`src.similitud.distancias`).
+    Aqui es donde se aplica el cambio de espacio, UNA vez para toda la matriz: de
+    ahi para abajo —seleccion de vecinos y residuo del minimo cuadrado— ya se
+    trabaja en la geometria elegida. None = euclidea, y entonces esto hace
+    literalmente lo que hacia antes de que la distancia fuera un parametro.
     """
     M = X.shape[0]
-    vecinos = vecinos_mas_cercanos(X, n_neighbors)
+    esp = espacio if espacio is not None else distancias.Espacio(distancias.POR_DEFECTO)
+    X = X if esp.es_identidad else esp.transformar(X)
+    resolver = (elasticnet_no_negativo if esp.euclidea_transformada
+                else elasticnet_residuo_l1)
+    vecinos = vecinos_mas_cercanos(X, n_neighbors, espacio=esp)
     cols_idx: list[np.ndarray] = []
     cols_val: list[np.ndarray] = []
     for s in range(M):
@@ -138,7 +223,7 @@ def slim_instancia(
         A = X[cand].T                     # (d, n_cand): features en filas
         y = X[s]                          # (d,): observacion objetivo
         w0 = None if inicial is None else inicial(s, cand)
-        w = elasticnet_no_negativo(
+        w = resolver(
             A, y, beta=beta, l1=l1, max_iter=max_iter, tol=tol, w_init=w0)
         nz = w > 0.0
         cols_idx.append(cand[nz].astype(np.int64))

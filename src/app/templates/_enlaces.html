@@ -1,17 +1,27 @@
 {#
   Macros de enlace, para que jugador y equipo se enlacen igual desde cualquier
-  listado y el modelo elegido viaje en la URL: la ficha se lee sobre el MISMO
-  artefacto que produjo la recomendación, no sobre el que la app elegiría por
-  defecto (que es el base).
+  listado y la elección del usuario viaje en la URL: la ficha se lee sobre el
+  MISMO artefacto y la MISMA base de datos que produjeron la recomendación, no
+  sobre los que la app elegiría por defecto (que son los de fábrica).
+
+  El conjunto de datos se toma de `conjunto` (lo pone `_contexto_base`) y por eso
+  estas macros se importan `with context`: sin él, seguir cualquier enlace desde
+  unos resultados consultados sobre otra BD volvería a la base, y una entidad que
+  solo está en la elegida daría «no encontrado» al abrir su ficha.
 #}
 
+{% macro slug_datos() -%}
+  {{- conjunto.slug if conjunto is defined and conjunto else none -}}
+{%- endmacro %}
+
 {% macro url_ficha(entidad, id, clave) -%}
+  {%- set datos = (conjunto.slug if conjunto is defined and conjunto else none) -%}
   {%- if entidad == 'equipo' -%}
     {{ url_for('web.ficha_equipo', entity_id=id,
-                modelo=clave.variante if clave else none) }}
+                modelo=clave.variante if clave else none, datos=datos) }}
   {%- else -%}
     {{ url_for('web.ficha_jugador', entity_id=id,
-                modelo=clave.variante if clave else none) }}
+                modelo=clave.variante if clave else none, datos=datos) }}
   {%- endif -%}
 {%- endmacro %}
 

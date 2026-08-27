@@ -105,7 +105,23 @@ class TestProbar:
             "--nombre", self._nombre(resumen_bd),
         )
         assert res.returncode == 0, res.stderr
-        assert "=== Formulacion 5 | equipo | global ===" in res.stdout
+        assert ("=== Formulacion 5 | equipo | global | distancia euclidea ==="
+                in res.stdout)
+
+    def test_elige_el_modelo_segun_la_distancia(
+        self, modelos: dict, resumen_bd: dict
+    ) -> None:
+        """Sin `--distancia` no habria forma de consultar desde la terminal un
+        modelo construido con otra geometria: viven en ficheros con sufijo."""
+        res = ejecutar_modulo(
+            "src.similitud.probar",
+            "--modelo", str(modelos["dir"]), "--entidad", "equipo",
+            "--formulacion", "5", "--normalizacion", "global",
+            "--distancia", "coseno", "--nombre", self._nombre(resumen_bd),
+        )
+        # El artefacto coseno no se construye en esta fixture: lo que se fija es
+        # que la flag llega hasta la carga y que el error dice QUE fichero falta.
+        assert "coseno" in (res.stdout + res.stderr)
 
     def test_un_nombre_inexistente_aborta_con_mensaje(self, modelos: dict) -> None:
         res = ejecutar_modulo(

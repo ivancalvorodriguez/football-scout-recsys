@@ -105,7 +105,8 @@ class TestEjes:
     ) -> None:
         df = figuras3d.leer_valores(barrido_2x2)
         combos = figuras3d.combinaciones_del_barrido(barrido_2x2, df)
-        assert set(figuras3d.ejes_variables(combos)) == {"F2_L1", "F2_BETA"}
+        assert set(figuras3d.ejes_variables(combos)) == {
+            "F2_L1", "F2_BETA", "F5_EASE_LAMBDA", "F5_RFF_DIM"}
 
     def test_los_demas_se_declaran_como_fijos(self, barrido_2x2: Path) -> None:
         """Van al pie de la figura: sin ellos, la superficie afirma menos de lo
@@ -114,10 +115,54 @@ class TestEjes:
         df = figuras3d.leer_valores(barrido_2x2)
         combos = figuras3d.combinaciones_del_barrido(barrido_2x2, df)
         variables = set(figuras3d.ejes_variables(combos))
-        assert figuras3d._fijos(combos, variables) == {"F5_RFF_DIM": 512}
+        assert figuras3d._fijos(combos, variables) == {"F5_METODO_EQUIPO": "sinkhorn"}
 
     def test_sin_combinaciones_no_hay_fijos(self) -> None:
         assert figuras3d._fijos({}, set()) == {}
+
+
+class TestEjesDelModelo:
+    """Cada modelo se dibuja sobre los ejes que lo determinan, no sobre todos.
+
+    Sin esto, un modelo F5 sobre el plano `F2_L1 x F2_BETA` tiene TODOS sus puntos
+    en la misma casilla (esos ejes valen su default en todas sus combinaciones): la
+    superficie salia como un unico punto.
+    """
+
+    VARIABLES = {"F2_L1": [0.25, 0.5], "F2_BETA": [1.0, 2.0],
+                 "F5_EASE_LAMBDA": [10.0, 50.0], "F5_RFF_DIM": [512, 1024]}
+
+    def test_un_modelo_f2_solo_ve_los_ejes_f2(self) -> None:
+        assert figuras3d.ejes_del_modelo(self.VARIABLES, "2", "equipo") == [
+            "F2_L1", "F2_BETA"]
+
+    def test_un_modelo_f5_solo_ve_los_ejes_f5(self) -> None:
+        assert figuras3d.ejes_del_modelo(self.VARIABLES, "5", "equipo") == [
+            "F5_EASE_LAMBDA", "F5_RFF_DIM"]
+
+    def test_conserva_el_orden_de_los_ejes_barridos(self) -> None:
+        """El orden de los ejes fija el de las figuras: no puede depender del modelo."""
+        alreves = {"F5_RFF_DIM": [512], "F5_EASE_LAMBDA": [10.0]}
+        assert figuras3d.ejes_del_modelo(alreves, "5", "equipo") == [
+            "F5_RFF_DIM", "F5_EASE_LAMBDA"]
+
+    def test_el_metodo_de_la_f5_va_por_entidad(self) -> None:
+        """`F5_METODO_JUGADOR` no reconstruye ningun modelo de equipo."""
+        variables = {"F5_METODO_JUGADOR": ["mmd"], "F5_METODO_EQUIPO": ["mmd"]}
+        assert figuras3d.ejes_del_modelo(variables, "5", "equipo") == [
+            "F5_METODO_EQUIPO"]
+        assert figuras3d.ejes_del_modelo(variables, "5", "jugador") == [
+            "F5_METODO_JUGADOR"]
+
+    def test_un_eje_desconocido_se_conserva_para_todos(self) -> None:
+        """No clasificarlo no es saber que no aplica: podarlo en silencio perderia
+        la unica figura que produjo un barrido de otra version del codigo.
+        """
+        variables = {"EJE_DE_OTRA_EPOCA": [1, 2], "F2_L1": [0.25, 0.5]}
+        assert figuras3d.ejes_del_modelo(variables, "5", "equipo") == [
+            "EJE_DE_OTRA_EPOCA"]
+        assert figuras3d.ejes_del_modelo(variables, "2", "equipo") == [
+            "EJE_DE_OTRA_EPOCA", "F2_L1"]
 
 
 class TestConstruirRejilla:
@@ -282,8 +327,14 @@ class TestPieDeFigura:
 
 
 class TestUtilidades:
-    def test_la_etiqueta_compacta_junta_los_tres_ejes(self) -> None:
-        assert figuras3d._etiqueta_modelo("2", "jugador", "global") == "F2_jugador_global"
+    def test_la_etiqueta_compacta_junta_los_cuatro_ejes(self) -> None:
+        assert figuras3d._etiqueta_modelo("2", "jugador", "global", "euclidea") ==             "F2_jugador_global_euclidea"
+
+    def test_la_distancia_separa_modelos_en_vez_de_ser_un_eje(self) -> None:
+        """Dos geometrias son dos modelos: cada una con su superficie sobre SUS
+        hiperparametros. Como eje daria cuatro casillas categoricas, no una
+        superficie."""
+        assert figuras3d._etiqueta_modelo("2", "jugador", "global", "manhattan") !=             figuras3d._etiqueta_modelo("2", "jugador", "global", "euclidea")
 
     def test_el_titulo_del_eje_declara_la_escala_si_no_es_lineal(self) -> None:
         """Un eje logaritmico cambia lo que significa la distancia entre ticks."""

@@ -6,6 +6,23 @@
   Si el usuario escribe y envía sin elegir, va vacío y el servidor resuelve por
   nombre.
 #}
+{# Modelo y datos desparejados: es legítimo (es lo que permite preguntar por
+   quien no estaba al entrenar) pero hay que decirlo, porque cambia de dónde sale
+   cada mitad de la respuesta.
+
+   Es el único aviso de la cabecera. El de cobertura incompleta que iba aquí
+   detrás decía lo mismo con otras palabras —modelo y datos que no cuadran— y
+   entre los dos y el rótulo de la propia respuesta («Calculado fuera del
+   modelo», en `resultados.html`) la página abría con tres bandas de aviso para
+   una situación normal. La cobertura se sigue midiendo y se sigue enseñando en
+   `/datos`, que es donde se decide reentrenar. #}
+{% if conjunto and datos_del_modelo and conjunto.slug != datos_del_modelo.slug %}
+  <p class="aviso aviso-menor">
+    Consultando sobre los datos <strong>{{ conjunto.nombre }}</strong> un modelo
+    entrenado con <strong>{{ datos_del_modelo.nombre }}</strong>.
+  </p>
+{% endif %}
+
 <form class="buscador" action="{{ url_for('web.similares') }}" method="get"
       data-api-sugerencias="{{ url_for('web.api_sugerencias') }}">
   <div class="campo campo-entidad">
@@ -39,6 +56,25 @@
         {% for v in variantes %}
           <option value="{{ v.slug }}" {{ 'selected' if clave and v.slug == clave.variante }}>
             {{ v.nombre }}
+          </option>
+        {% endfor %}
+      </select>
+    </div>
+  {% endif %}
+
+  {# Sobre qué base de datos se consulta. Es una elección aparte de la del
+     modelo: la BD dice QUIÉN existe (y de quién se conocen equipo, posiciones y
+     valores reales) y el modelo, cómo se parecen entre sí. Elegir una BD más
+     amplia que la del entrenamiento permite preguntar por jugadores que el
+     modelo no vio, que se colocan en él al vuelo. Con un solo conjunto no hay
+     nada que elegir y el desplegable no se pinta. #}
+  {% if conjuntos is defined and conjuntos | length > 1 %}
+    <div class="campo campo-datos">
+      <label for="datos">Datos</label>
+      <select id="datos" name="datos">
+        {% for c in conjuntos %}
+          <option value="{{ c.slug }}" {{ 'selected' if conjunto and c.slug == conjunto.slug }}>
+            {{ c.nombre }}
           </option>
         {% endfor %}
       </select>

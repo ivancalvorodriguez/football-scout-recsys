@@ -176,8 +176,46 @@ def test_la_diferencia_de_la_formulacion_2_es_el_criterio_de_parada(
     assert relativa < 1e-6
 
 
+# EASE bajo el que se mide el efecto del kernel congelado. NO es el del modelo
+# servido (0,045, apenas re-ranking): con una lambda tan pequeña la S es casi la
+# similitud distribucional en crudo y, en este escenario de 9 entidades, las dos
+# variantes quedan a un 0,4 % una de otra — el efecto existe pero no se distingue
+# del ruido de la escala. Se fija aqui para que la prueba mida lo que dice medir
+# y no dependa de un valor que el barrido puede mover.
+EASE_MEDIBLE = 50.0
+
+
+@pytest.fixture
+def modelos_con_ease(escenario, tmp_path, monkeypatch) -> Path:
+    """Ajuste inicial de F5/jugador con EASE activo, y lo deja activo.
+
+    Tiene que construirse DENTRO del monkeypatch, no solo reentrenarse: el estado
+    warm guarda la huella de los hiperparametros con los que se ajusto, asi que un
+    inicial a lambda 0 y un reentrenamiento a lambda 50 no se reconocerian y los
+    dos caminos acabarian en un ajuste en frio identico — la prueba pasaria sin
+    ejercitar nada.
+
+    Se parchea tambien `HIPERPARAMETROS_SERVIBLES`, y no solo el default del
+    modulo: F5/jugador/por_liga ES la celda servible, asi que `reentrenar_uno` le
+    pone los valores del artefacto servido y esos ganarian al monkeypatch. Sin
+    esto, el reentrenamiento ajustaria con otra lambda que el inicial y volveria a
+    caer en el ajuste en frio de los dos lados.
+    """
+    from src.similitud import config as config_sim
+
+    monkeypatch.setattr(config_sim, "F5_EASE_LAMBDA", EASE_MEDIBLE)
+    monkeypatch.setitem(
+        config_sim.HIPERPARAMETROS_SERVIBLES, "jugador",
+        {**config_sim.HIPERPARAMETROS_SERVIBLES["jugador"],
+         "F5_EASE_LAMBDA": EASE_MEDIBLE},
+    )
+    out = tmp_path / "inicial-ease"
+    build._construir_uno(escenario["antes"], out, "5", "jugador", "por_liga")
+    return out
+
+
 def test_congelar_el_kernel_estabiliza_a_las_entidades_intactas(
-    escenario, modelos_iniciales, tmp_path
+    escenario, modelos_con_ease, tmp_path
 ):
     """Con MMD, heredar el ancho del kernel mantiene a las viejas en su sitio.
 
@@ -187,11 +225,11 @@ def test_congelar_el_kernel_estabiliza_a_las_entidades_intactas(
     """
     congelado = tmp_path / "congelado"
     refrescado = tmp_path / "refrescado"
-    _reentrenar(escenario, modelos_iniciales, "5", "jugador", congelado)
-    _reentrenar(escenario, modelos_iniciales, "5", "jugador", refrescado,
+    _reentrenar(escenario, modelos_con_ease, "5", "jugador", congelado)
+    _reentrenar(escenario, modelos_con_ease, "5", "jugador", refrescado,
                 refrescar_kernel=True)
 
-    inicial = cargar_modelo(modelos_iniciales, "5", "jugador", "por_liga")
+    inicial = cargar_modelo(modelos_con_ease, "5", "jugador", "por_liga")
     viejas = set(inicial.entity_ids.tolist())
 
     def desplazamiento(dir_modelo: Path) -> float:
@@ -276,7 +314,10 @@ def test_estado_con_otros_hiperparametros_se_descarta(
 ):
     from src.similitud import config as config_sim
 
-    monkeypatch.setattr(config_sim, "F5_EASE_LAMBDA", config_sim.F5_EASE_LAMBDA * 2)
+    # Se SUMA, no se multiplica: el default de produccion es 0.0 y multiplicarlo
+    # dejaria el hiperparametro donde estaba, con lo que el estado warm encajaria
+    # y la prueba pasaria por el motivo contrario al que dice comprobar.
+    monkeypatch.setattr(config_sim, "F5_EASE_LAMBDA", config_sim.F5_EASE_LAMBDA + 7.0)
     informe = _reentrenar(escenario, modelos_iniciales, "5", "equipo", tmp_path / "h")
 
     assert not informe["warm"]["aplicado"]

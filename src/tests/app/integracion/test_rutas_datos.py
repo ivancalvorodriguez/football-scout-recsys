@@ -14,16 +14,23 @@ from pathlib import Path
 
 import pytest
 
+from src.app import config as config_app
 from src.app.factoria import crear_app
 from src.app.rutas_datos import resumen_bd, resumen_modelos
 from src.app.tareas import Tarea, TareaEnCurso
-from src.tests.app.conftest import VARIANTE_NOMBRE, VARIANTE_SLUG
+from src.tests.app.conftest import (
+    USUARIO_A,
+    ClienteConCSRF,
+    VARIANTE_NOMBRE,
+    VARIANTE_SLUG,
+    entrar,
+)
 
 pytestmark = pytest.mark.integracion
 
 
 @pytest.fixture
-def app(dir_modelos: Path, bd: Path, tmp_path: Path):
+def app(dir_modelos: Path, bd: Path, tmp_path: Path, fichero_usuarios: Path):
     """App sobre COPIAS de los modelos y de la BD: aquí se escribe de verdad.
 
     Entrenar un modelo reserva su carpeta y crear un conjunto de datos copia la
@@ -35,27 +42,36 @@ def app(dir_modelos: Path, bd: Path, tmp_path: Path):
     copia_bd = tmp_path / "db" / bd.name
     copia_bd.parent.mkdir(parents=True)
     shutil.copy2(bd, copia_bd)
-    return crear_app(modelos, db_path=copia_bd, testing=True)
+    creada = crear_app(modelos, db_path=copia_bd, ruta_usuarios=fichero_usuarios,
+                       testing=True)
+    creada.test_client_class = ClienteConCSRF
+    return creada
 
 
 class GestorFalso:
     """Sustituto del ejecutor: registra las llamadas en vez de lanzar procesos."""
 
-    def __init__(self, ocupado: bool = False) -> None:
-        self.llamadas: list[tuple[str, str, list[str]]] = []
+    def __init__(self, ocupado: bool = False, usuario_ocupante: str = "otro") -> None:
+        self.llamadas: list[tuple[str, str, list[str], str | None]] = []
         self.ocupado = ocupado
+        self.usuario_ocupante = usuario_ocupante
 
-    def lanzar(self, tipo: str, titulo: str, argumentos: list[str]) -> Tarea:
+    def lanzar(self, tipo: str, titulo: str, argumentos: list[str],
+               usuario: str | None = None) -> Tarea:
         if self.ocupado:
             raise TareaEnCurso("Ya hay una tarea en curso (Reentrenando).")
-        self.llamadas.append((tipo, titulo, argumentos))
-        return Tarea(id="x", tipo=tipo, titulo=titulo, comando=["python"])
+        self.llamadas.append((tipo, titulo, argumentos, usuario))
+        return Tarea(id="x", tipo=tipo, titulo=titulo, comando=["python"],
+                     usuario=usuario)
 
-    def ultima(self):
+    def ultima(self, usuario: str | None = None):
         return None
 
     def en_curso(self):
         return None
+
+    def hay_alguna_en_curso(self) -> bool:
+        return self.ocupado
 
 
 @pytest.fixture
@@ -97,7 +113,10 @@ def test_el_panel_resume_la_base_de_datos(cliente):
 
 def test_el_panel_lista_los_modelos_con_su_fecha(cliente):
     html = cliente.get("/datos/").get_data(as_text=True)
-    assert "z-score global" in html
+    # La etiqueta sale de la normalizacion que sirva cada entidad, que cambia al
+    # promover modelos: se deriva de la config en vez de fijar una redaccion.
+    for entidad, (_, normalizacion) in config_app.MODELO_BASE.items():
+        assert config_app.ETIQUETA_NORMALIZACION[normalizacion] in html
     assert VARIANTE_NOMBRE in html          # el reentrenado, con su nombre
     assert "Entrenar" in html
 
@@ -135,18 +154,32 @@ def test_resumen_bd_de_un_fichero_que_no_es_sqlite(tmp_path: Path):
 def test_resumen_modelos_sin_nada_construido(tmp_path: Path):
     """El base sin artefactos no es un modelo a medias: no se ha construido."""
     from src.app.catalogo import Catalogo
+    from src.app.conjuntos import CatalogoDatos
+    from src.app.fuentes import Fuentes
 
-    assert resumen_modelos(Catalogo(tmp_path / "vacio")) == []
+    vacio = tmp_path / "vacio"
+    assert resumen_modelos(
+        Catalogo(vacio), CatalogoDatos(tmp_path / "no.db"),
+        Fuentes(tmp_path / "no.db"), USUARIO_A,
+    ) == []
 
 
-def test_el_panel_sin_modelos_lo_dice(bd: Path, tmp_path: Path):
-    cliente = crear_app(tmp_path / "vacio", db_path=bd, testing=True).test_client()
+def test_el_panel_sin_modelos_lo_dice(bd: Path, tmp_path: Path,
+                                     fichero_usuarios: Path):
+    app = crear_app(tmp_path / "vacio", db_path=bd,
+                    ruta_usuarios=fichero_usuarios, testing=True)
+    app.test_client_class = ClienteConCSRF
+    cliente = app.test_client()
+    entrar(cliente)
     assert "No hay modelos en" in cliente.get("/datos/").get_data(as_text=True)
 
 
 def test_resumen_modelos_agrupa_por_modelo(app):
     """Uno por nombre, con sus dos artefactos (jugador y equipo) fechados."""
-    modelos = resumen_modelos(app.extensions["catalogo"])
+    modelos = resumen_modelos(
+        app.extensions["catalogo"], app.extensions["datos"],
+        app.extensions["fuentes"], USUARIO_A,
+    )
     assert [m["variante"].slug for m in modelos] == ["base", VARIANTE_SLUG]
     for m in modelos:
         assert {a["clave"].entidad for a in m["artefactos"]} == {"jugador", "equipo"}
@@ -238,7 +271,6 @@ def test_lo_escrito_sobrevive_a_la_redireccion(cliente, gestor: GestorFalso,
 
 
 def test_sin_nada_escrito_se_propone_el_paquete_por_defecto(cliente, gestor):
-    from src.app import config as config_app
 
     html = cliente.get("/datos/").get_data(as_text=True)
     assert f'value="{config_app.PAQUETE_DEFECTO}"' in html
@@ -261,7 +293,7 @@ def test_el_resultado_va_a_la_carpeta_del_modelo_nuevo(cliente, gestor: GestorFa
     catalogo = app.extensions["catalogo"]
     assert _valor(args, "--out") == str(catalogo.dir_modelo("con-la-bundesliga"))
     assert _valor(args, "--out") != _valor(args, "--modelos")
-    assert catalogo.variante("con-la-bundesliga").nombre == "Con la Bundesliga"
+    assert catalogo.variante("con-la-bundesliga", USUARIO_A).nombre == "Con la Bundesliga"
 
 
 def test_siempre_las_dos_entidades_y_siempre_warm(cliente, gestor: GestorFalso):
@@ -328,7 +360,7 @@ def test_ingerir_crea_un_conjunto_nuevo_y_apunta_ahi(cliente, gestor: GestorFals
                  data={"paquete": str(paquete), "nombre_datos": "Con la Bundesliga"})
     args = _args(gestor)
     catalogo_datos = app.extensions["datos"]
-    nuevo = catalogo_datos.conjunto("con-la-bundesliga")
+    nuevo = catalogo_datos.conjunto("con-la-bundesliga", USUARIO_A)
     assert _valor(args, "--db") == str(nuevo.ruta)
     assert _valor(args, "--db") != str(app.config["APP_SIMILITUD"].db_path)
     # La copia ES el estado anterior: la de seguridad de `ingesta` sobra.
@@ -344,10 +376,10 @@ def test_la_copia_llega_completa_antes_de_lanzar(cliente, gestor: GestorFalso, a
 
 def test_se_puede_partir_de_un_conjunto_ya_creado(cliente, gestor: GestorFalso, app,
                                                   paquete: Path):
-    app.extensions["datos"].crear("Primero")
+    app.extensions["datos"].crear("Primero", USUARIO_A)
     cliente.post("/datos/ingerir", data={
         "paquete": str(paquete), "nombre_datos": "Segundo", "datos_origen": "primero"})
-    assert app.extensions["datos"].conjunto("segundo").origen == "primero"
+    assert app.extensions["datos"].conjunto("segundo", USUARIO_A).origen == "primero"
 
 
 def test_sin_nombre_no_se_crea_ningun_conjunto(cliente, gestor: GestorFalso, app,
@@ -356,12 +388,12 @@ def test_sin_nombre_no_se_crea_ningun_conjunto(cliente, gestor: GestorFalso, app
                      data={"paquete": str(paquete), "nombre_datos": "  "})
     assert r.status_code == 400
     assert gestor.llamadas == []
-    assert [c.slug for c in app.extensions["datos"].conjuntos()] == ["base"]
+    assert [c.slug for c in app.extensions["datos"].conjuntos(USUARIO_A)] == ["base"]
 
 
 def test_un_nombre_de_conjunto_repetido_se_rechaza(cliente, gestor: GestorFalso, app,
                                                    paquete: Path):
-    app.extensions["datos"].crear("Ampliado")
+    app.extensions["datos"].crear("Ampliado", USUARIO_A)
     r = cliente.post("/datos/ingerir",
                      data={"paquete": str(paquete), "nombre_datos": "ampliado"})
     assert r.status_code == 400
@@ -383,11 +415,11 @@ def test_validar_no_crea_ningun_conjunto(cliente, gestor: GestorFalso, app,
     """«Solo validar» no escribe nada: tampoco un conjunto vacío."""
     r = cliente.post("/datos/validar", data={"paquete": str(paquete)})
     assert r.status_code == 302
-    assert [c.slug for c in app.extensions["datos"].conjuntos()] == ["base"]
+    assert [c.slug for c in app.extensions["datos"].conjuntos(USUARIO_A)] == ["base"]
 
 
 def test_el_panel_lista_los_conjuntos_con_sus_cifras(cliente, app):
-    app.extensions["datos"].crear("Con la Bundesliga")
+    app.extensions["datos"].crear("Con la Bundesliga", USUARIO_A)
     html = cliente.get("/datos/").get_data(as_text=True)
     assert "Conjuntos de datos" in html
     assert "Con la Bundesliga" in html
@@ -396,11 +428,11 @@ def test_el_panel_lista_los_conjuntos_con_sus_cifras(cliente, app):
 
 def test_entrenar_usa_el_conjunto_elegido(cliente, gestor: GestorFalso, app):
     """El modelo se entrena sobre esa BD y lo deja apuntado para servirse luego."""
-    nuevo = app.extensions["datos"].crear("Con la Bundesliga")
+    nuevo = app.extensions["datos"].crear("Con la Bundesliga", USUARIO_A)
     cliente.post("/datos/reentrenar",
                  data={"nombre": "M2", "datos_origen": "con-la-bundesliga"})
     assert _valor(_args(gestor), "--db") == str(nuevo.ruta)
-    assert app.extensions["catalogo"].variante("m2").datos == "con-la-bundesliga"
+    assert app.extensions["catalogo"].variante("m2", USUARIO_A).datos == "con-la-bundesliga"
 
 
 def test_entrenar_sobre_un_conjunto_inventado_se_rechaza(cliente, gestor: GestorFalso,
@@ -482,16 +514,26 @@ def test_con_una_tarea_en_curso_se_avisa(cliente, app, paquete: Path):
 
 # --- API de seguimiento -------------------------------------------------------
 def test_la_api_de_tarea_responde_sin_tareas(cliente, gestor: GestorFalso):
-    assert cliente.get("/datos/tarea").get_json() == {"tarea": None}
+    assert cliente.get("/datos/tarea").get_json() == {"tarea": None, "ocupado": False}
 
 
 class ConTarea(GestorFalso):
     """Gestor con una tarea ya terminada, para ver cómo se pinta."""
 
-    def ultima(self):
+    def ultima(self, usuario: str | None = None):
         return Tarea(id="abc", tipo="ingerir", titulo="Incorporando",
                      comando=["python", "-m", "x", "--paquete", "sitio"],
-                     lineas=["hola"], estado="terminada", codigo=0)
+                     lineas=["hola"], estado="terminada", codigo=0,
+                     usuario=usuario, progreso=1.0, paso="partido 3 de 3")
+
+
+class ConTareaFallida(GestorFalso):
+    """Gestor con una tarea que ha fallado: la página tiene que decir por qué."""
+
+    def ultima(self, usuario: str | None = None):
+        return Tarea(id="abc", tipo="ingerir", titulo="Incorporando",
+                     comando=["python", "-m", "x"], estado="fallida", codigo=2,
+                     lineas=["Error: la carpeta no existe"], usuario=usuario)
 
 
 def test_la_api_de_tarea_describe_la_ultima(cliente, app):
@@ -499,21 +541,38 @@ def test_la_api_de_tarea_describe_la_ultima(cliente, app):
     datos = cliente.get("/datos/tarea").get_json()["tarea"]
     assert datos["id"] == "abc"
     assert datos["titulo"] == "Incorporando"
-    assert datos["lineas"] == ["hola"]
-    assert datos["comando"] == "python -m x --paquete sitio"
+    assert datos["progreso"] == 1.0
+    assert datos["paso"] == "partido 3 de 3"
 
 
-def test_la_pagina_pinta_el_comando_igual_que_la_api(cliente, app):
-    """El servidor y el JS reescriben el mismo hueco: no pueden dar formatos distintos."""
+def test_la_api_de_tarea_no_manda_ni_el_log_ni_el_comando(cliente, app):
+    """La página no los pinta, así que mandarlos solo sería exponer el servidor."""
+    app.extensions["tareas"] = ConTarea()
+    datos = cliente.get("/datos/tarea").get_json()["tarea"]
+    assert "lineas" not in datos and "comando" not in datos
+
+
+def test_la_pagina_no_pinta_ni_la_consola_ni_el_comando(cliente, app):
+    """Del subproceso se enseña el avance, no su salida ni cómo se invocó."""
     app.extensions["tareas"] = ConTarea()
     html = cliente.get("/datos/").get_data(as_text=True)
-    assert "python -m x --paquete sitio" in html
-    assert "['python'" not in html      # la lista en crudo seria ilegible
+    assert "python -m x --paquete sitio" not in html
+    assert "tarea-log" not in html
+    assert "hola" not in html
 
 
-def test_la_pagina_muestra_el_estado_y_la_salida(cliente, app):
+def test_la_pagina_muestra_el_estado_y_el_avance(cliente, app):
     app.extensions["tareas"] = ConTarea()
     html = cliente.get("/datos/").get_data(as_text=True)
     assert "Incorporando" in html
     assert "estado-terminada" in html
-    assert "hola" in html
+    assert "partido 3 de 3" in html
+
+
+def test_una_tarea_fallida_dice_por_que_en_la_pagina(cliente, app):
+    """Es lo que sustituye al volcado del log: sin esto, «fallida» a secas."""
+    app.extensions["tareas"] = ConTareaFallida()
+    html = cliente.get("/datos/").get_data(as_text=True)
+    assert "Error: la carpeta no existe" in html
+    assert cliente.get("/datos/tarea").get_json()["tarea"]["error"] == (
+        "Error: la carpeta no existe")

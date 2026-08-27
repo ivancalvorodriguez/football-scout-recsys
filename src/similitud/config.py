@@ -7,6 +7,7 @@ dos formulaciones SLIM. Sigue el estilo de `src/extraccion/config.py`.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 
 from src.extraccion.config import POSITIONS_25, position_slug
@@ -23,15 +24,110 @@ DEFAULT_MODEL_DIR = Path("outputs/modelo")
 # estas dos: el usuario elige entre MODELOS (base, reentrenados), no entre
 # variantes metodologicas que no puede juzgar desde el navegador.
 #
-# La eleccion sale de la evaluacion (`outputs/evaluacion/`): la F5 distribucional
-# cubre a todos los jugadores (la F2 deja fuera a los poco conectados, ver
-# `modelo.top_k`) y la F2 se comporta mejor con los pocos cientos de equipos.
-# `global` en las dos para que jugador y equipo se lean contra la misma
-# referencia (la media de todo el dataset).
+# La eleccion sale de la evaluacion (`outputs/evaluacion/`): son las mejores
+# combinaciones del score compuesto de los barridos `jugador_v3` y `equipo_v3`
+# ENTRE LAS QUE NO USAN MAHALANOBIS (jugador v87, equipo v349), con la fase 7
+# (generalizacion) dentro del score. Las dos son F5 distribucional: cubre a todas
+# las entidades (la F2 deja fuera a las poco conectadas, ver `modelo.top_k`) y es
+# la unica que se sabe proyectar con fidelidad `FIEL`
+# (`foldin.METODOS_PROYECTABLES`). Las dos entidades NO comparten normalizacion
+# —jugador `por_liga`, equipo `global`—: lo eligio la medida, no la simetria, y la
+# interfaz la rotula en cada respuesta (`config.REFERENCIA_Z` de la app).
 MODELOS_SERVIBLES: dict[str, tuple[str, str]] = {
-    "jugador": ("5", "global"),
-    "equipo": ("2", "global"),
+    "jugador": ("5", "por_liga"),
+    "equipo": ("5", "global"),
 }
+
+# Hiperparametros con los que se ajusto CADA artefacto servido (linaje completo
+# en `outputs/modelo/produccion.json`). Es una tabla aparte y no los defaults del
+# modulo porque las dos entidades comparten formulacion con VALORES DISTINTOS:
+# jugador y equipo salen de combinaciones distintas del barrido, asi que un solo
+# `F5_RFF_DIM` no puede reproducir los dos. Se aplica al construir o reentrenar
+# la celda servible de una entidad (ver `hiperparametros_servibles` y su uso en
+# `build.main` y en `src.incremental.reentrenar`), que es lo que hace que el
+# boton «Entrenar» de /datos genere modelos de la MISMA familia que los servidos.
+#
+# Lo que NO toca es el barrido: ahi los hiperparametros los fija cada combinacion
+# (`src/evaluacion/barrido.py`), que es justamente lo que se esta comparando.
+HIPERPARAMETROS_SERVIBLES: dict[str, dict[str, object]] = {
+    # jugador v91 de outputs/evaluacion/jugador_v3. `F5_EASE_LAMBDA` = 0 es
+    # deliberado: es el valor de la combinacion promovida, y significa EASE SIN
+    # termino ridge (la forma cerrada invierte S^T S a secas, ver `slim.ease`).
+    # Con 2.640 jugadores esa inversa existe y el ajuste es estable, pero es el
+    # borde de la rejilla: si al ampliar el catalogo la matriz se acerca a
+    # singular, hay que volver a un lambda > 0.
+    "jugador": {
+        "F5_METODO_JUGADOR": "mmd",
+        "F5_RFF_DIM": 1536,
+        "F5_EASE_LAMBDA": 0.0,
+    },
+    # equipo v349 de outputs/evaluacion/equipo_v3
+    "equipo": {
+        "F5_METODO_EQUIPO": "mmd",
+        "F5_RFF_DIM": 1216,
+        "F5_EASE_LAMBDA": 0.03,
+    },
+}
+
+
+# Distancia entre observaciones con la que se sirve. No esta en
+# `MODELOS_SERVIBLES` porque no es una eleccion por entidad: las dos entidades se
+# sirven con la MISMA geometria. Desde la promocion del 25-8-2026 es `manhattan`
+# (suma de diferencias absolutas), que es la que encabeza el score compuesto en
+# las dos entidades ENTRE LAS GEOMETRIAS NO BLANQUEADAS.
+#
+# Por que no mahalanobis, que puntuaba mas alto: su blanqueo reescala todas las
+# direcciones y DESHACE la ponderacion del bloque de posicion
+# (`POSITION_SCALING`, mas abajo), medido: el bloque pasa del 2 % al 33 % de la
+# distancia^2. Es una interaccion sin resolver, asi que esa geometria no se sirve
+# y sus artefactos no se conservan.
+#
+# `manhattan` no tiene ese problema: su `transformar` es la identidad, de modo que
+# el `/sqrt(25)` del bloque de posicion sigue valiendo exactamente lo que dice
+# valer. Lo que si tiene es coste: en la F2 el kNN pierde la identidad
+# `||a||^2+||b||^2-2ab` y pasa a O(M^2 d) fila a fila (horas sobre las ~50.000
+# observaciones de jugador). No afecta a lo que sirve la app, que es F5
+# (submuestra + RFF con kernel laplaciano), pero si a un `build --formulacion 2
+# --distancia manhattan`.
+DISTANCIA_SERVIBLE = "manhattan"
+
+
+def es_servible(entidad: str, formulacion: str, normalizacion: str,
+                distancia: str = DISTANCIA_SERVIBLE) -> bool:
+    """¿Es esa celda la que la app sirve para esa entidad?"""
+    return (
+        MODELOS_SERVIBLES.get(entidad) == (formulacion, normalizacion)
+        and distancia == DISTANCIA_SERVIBLE
+    )
+
+
+@contextmanager
+def hiperparametros_servibles(entidad: str, formulacion: str, normalizacion: str,
+                              distancia: str = DISTANCIA_SERVIBLE):
+    """Fija los hiperparametros del artefacto servido, si la celda es la servible.
+
+    Todo el pipeline lee `config.X` en tiempo de llamada, asi que basta con
+    ponerlos antes de ajustar y restaurarlos despues (misma mecanica que
+    `src.evaluacion.trabajo.config_temporal`, sin depender de el: esto vive en
+    `similitud` y aquello en `evaluacion`).
+
+    Cede el diccionario de lo que ha puesto, vacio cuando no es la celda servible
+    o la entidad no tiene fila en `HIPERPARAMETROS_SERVIBLES`: asi se puede
+    envolver cualquier construccion sin comprobar antes, y quien lo use puede
+    decir en el log si esa celda lleva valores propios.
+    """
+    valores = (
+        HIPERPARAMETROS_SERVIBLES.get(entidad, {})
+        if es_servible(entidad, formulacion, normalizacion, distancia)
+        else {}
+    )
+    previos = {attr: globals()[attr] for attr in valores}
+    globals().update(valores)
+    try:
+        yield dict(valores)
+    finally:
+        globals().update(previos)
+
 
 # --- Posicion como feature del jugador (one-hot ponderado por % de minutos) ---
 # Catalogo canonico de las 25 posiciones StatsBomb -> slugs de columna, en orden
@@ -79,6 +175,15 @@ USE_POSITION_FEATURES = True
 # Sea cual sea el modo, la pureza posicional (Fase 0) y el k-NN por posicion
 # (Fase 5) usan la posicion como ETIQUETA: con el bloque encendido son
 # circulares y no valen como evidencia.
+#
+# OJO con la geometria: esta ponderacion vale tal cual en las distancias cuyo
+# `transformar` NO reescala las columnas (euclidea y manhattan, la servida). Con
+# `mahalanobis` NO vale: el blanqueo reescala todas las direcciones y el /sqrt(25)
+# se deshace —medido sobre la BD real, el bloque pasa del 2 % al 33 % de la
+# distancia^2, casi lo mismo que si no se dividiera (36 %)—. Es consecuencia de
+# que la distancia de Mahalanobis sea invariante a cambios lineales de las
+# features, asi que ningun valor de este atributo la cambia. Por eso esa geometria
+# no se sirve.
 POSITION_SCALING = "zscore_sqrt"
 
 # --- Conteos crudos que se convierten a per-90 (jugador) ---------------------
@@ -142,9 +247,16 @@ TEAM_DIFF_FEATURES: list[tuple[str, str, str]] = [
 
 # --- Hiperparametros Formulacion 2 (SLIM instancia-instancia) ----------------
 # fsSLIM: cada observacion se reconstruye solo desde sus vecinas -> W tratable.
+#
+# Los valores de BETA y L1 son los de la combinacion v183 del barrido
+# `outputs/evaluacion/f2_equipo_v2`. La F2 ya NO se sirve —el equipo paso a la F5
+# con los modelos de agosto de 2026, ver MODELOS_SERVIBLES—, asi que estos
+# defaults ya no reproducen ningun artefacto de produccion: son el mejor punto
+# conocido de la F2 y lo que construye `build --formulacion 2`, que sigue siendo
+# el brazo de comparacion del TFG.
 F2_N_NEIGHBORS = 100
-F2_BETA = 1.0        # coeficiente L2 (ridge) del objetivo SLIM
-F2_L1 = 0.5          # coeficiente L1 (sparsity) del objetivo SLIM
+F2_BETA = 13.8       # coeficiente L2 (ridge) del objetivo SLIM   [v183]
+F2_L1 = 0.48         # coeficiente L1 (sparsity) del objetivo SLIM [v183]
 F2_MAX_ITER = 200
 F2_TOL = 1e-4
 
@@ -152,12 +264,26 @@ F2_TOL = 1e-4
 # Etapa 1 (similitud distribucional). Metodo por tipo de entidad.
 F5_METODO_JUGADOR = "mmd"      # kernel mean embedding via Random Fourier Features
 F5_METODO_EQUIPO = "sinkhorn"  # OT entropico exacto (P pequeno -> barato)
-F5_RFF_DIM = 512               # dimension del embedding RFF para MMD
+F5_RFF_DIM = 1152              # dimension del embedding RFF para MMD    [v83]
 F5_RFF_SEED = 20240714
 F5_SINKHORN_REG = 0.5          # regularizacion entropica (log-domain)
 F5_SINKHORN_ITERS = 100
 # Etapa 2 (EASE de re-ranking sobre la matriz de similitud entidad-entidad).
-F5_EASE_LAMBDA = 50.0
+# 0.0 seria servir la S distribucional tal cual; el barrido v3 encuentra el
+# optimo con re-ranking suave.
+F5_EASE_LAMBDA = 0.045         # [v83]
+
+# Estos DOS defaults eran los del jugador servido hasta la promocion del
+# 16-8-2026 (v83 de `outputs/evaluacion/jugador_v3`) y **ya no lo son**: el
+# jugador servido es v147 (RFF_DIM 1536, EASE_LAMBDA 0.02) y el equipo v276
+# (1152 y 0.0). No se mueven a proposito. Un default entra en la HUELLA de todo
+# artefacto construido sin pasar por la tabla (`src.evaluacion.huella`), asi que
+# cambiarlo invalidaria de golpe las ~1.600 combinaciones acumuladas en
+# `outputs/evaluacion/` sin cambiar ni un numero de ninguna. Lo que reproduce el
+# modelo servido es `HIPERPARAMETROS_SERVIBLES`, arriba, que `build` y
+# `src.incremental.reentrenar` aplican en la celda servible de cada entidad.
+# Lo de aqui es lo que ve todo lo demas: el resto de celdas de `build` y el punto
+# de partida del barrido.
 
 # Recorte (winsorizado) de las features estandarizadas. Los per-90 de partidos
 # con muy pocos minutos (p. ej. 0.5') generan z-scores extremos (+-30) que

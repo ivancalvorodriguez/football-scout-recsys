@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import config, distributional, slim, warm
+from . import config, distancias, distributional, slim, warm
 from .features import MatrizFeatures
+from .formulacion2 import _espacio_del_ajuste
 from .modelo import (
     ModeloSimilitud,
     features_display,
@@ -54,10 +55,11 @@ def hiperparametros(entidad: str) -> dict:
 
 
 def construir(
-    mf: MatrizFeatures, entidad: str, normalizacion: str = "por_liga"
+    mf: MatrizFeatures, entidad: str, normalizacion: str = "por_liga",
+    distancia: str = distancias.POR_DEFECTO,
 ) -> ModeloSimilitud:
     """Entrena la Formulacion 5 en frio y devuelve el modelo servible."""
-    modelo, _ = construir_con_estado(mf, entidad, normalizacion)
+    modelo, _ = construir_con_estado(mf, entidad, normalizacion, distancia=distancia)
     return modelo
 
 
@@ -68,6 +70,7 @@ def construir_con_estado(
     previo: EstadoWarm | None = None,
     progreso=None,
     congelar_kernel: bool = True,
+    distancia: str = distancias.POR_DEFECTO,
 ) -> tuple[ModeloSimilitud, EstadoWarm]:
     """Entrena la Formulacion 5 y devuelve tambien el estado reutilizable.
 
@@ -89,15 +92,24 @@ def construir_con_estado(
     La etapa 2 (EASE) se resuelve siempre entera: es de forma cerrada y su coste
     (una inversa P x P) es de segundos a esta escala, asi que una actualizacion
     incremental por Woodbury seria mas codigo, mas fragil y no mas rapida.
+
+    ``distancia`` es la geometria entre observaciones (`src.similitud.distancias`)
+    y la respetan las dos etapas: el kernel del MMD es el que le corresponde (RBF
+    para las euclideas, laplaciano para la manhattan) y el coste del Sinkhorn es
+    el suyo. El ancho del kernel se mide EN esa distancia, asi que un sigma
+    congelado solo vale dentro de su propio espacio — de ahi que la distancia
+    entre en la compatibilidad del estado warm.
     """
     idx = indexar_entidades(mf)
     n_ent = len(idx.ids)
     M = mf.X.shape[0]
     metodo = _metodo_por_entidad(entidad)
+    distancia = distancias.validar(distancia)
 
     hiper = hiperparametros(entidad)
-    emp = warm.emparejar(previo, mf, idx.ids, hiper)
+    emp = warm.emparejar(previo, mf, idx.ids, hiper, distancia=distancia)
     reutiliza = previo is not None and emp.hay_reutilizacion
+    espacio = _espacio_del_ajuste(mf, distancia, previo, reutiliza, congelar_kernel)
 
     sigma = (
         previo.sigma
@@ -118,13 +130,15 @@ def construir_con_estado(
     # Etapa 1: similitud distribucional entidad-entidad (sin colapsar input).
     if metodo == "sinkhorn":
         costos = distributional.costos_sinkhorn(
-            mf, idx.row_entity, n_ent, progreso=progreso, previos=costos_previos)
+            mf, idx.row_entity, n_ent, progreso=progreso, previos=costos_previos,
+            espacio=espacio)
         S_ent = distributional.kernel_desde_costos(costos)
     else:
         costos = None
         if sigma is None:
-            sigma = distributional.sigma_kernel(mf.X)
-        S_ent = distributional.similitud_mmd(mf, idx.row_entity, n_ent, sigma=sigma)
+            sigma = distributional.sigma_kernel(mf.X, espacio=espacio)
+        S_ent = distributional.similitud_mmd(
+            mf, idx.row_entity, n_ent, sigma=sigma, espacio=espacio)
 
     # Etapa 2: EASE aprende B; la puntuacion servible es S_ent @ B.
     B = slim.ease(S_ent, lam=config.F5_EASE_LAMBDA)
@@ -140,6 +154,7 @@ def construir_con_estado(
         "rff_dim": config.F5_RFF_DIM if metodo == "mmd" else None,
         "sinkhorn_reg": config.F5_SINKHORN_REG if metodo == "sinkhorn" else None,
         "normalizacion": normalizacion,
+        "distancia": distancia,
         "ligas_por_entidad": ligas_por_entidad(mf, idx),
         "warm": {
             "aplicado": reutiliza,
@@ -152,8 +167,9 @@ def construir_con_estado(
             mf.estadisticas.como_dict() if mf.estadisticas is not None else None
         ),
         "descripcion": (
-            "Etapa 1 similitud distribucional (%s) sobre las nubes de "
-            "observaciones + etapa 2 EASE (SLIM cerrado) de re-ranking." % metodo
+            "Etapa 1 similitud distribucional (%s, distancia %s) sobre las nubes "
+            "de observaciones + etapa 2 EASE (SLIM cerrado) de re-ranking."
+            % (metodo, distancia)
         ),
     }
     modelo = ModeloSimilitud(
@@ -166,7 +182,8 @@ def construir_con_estado(
         feat_display=features_display(mf, idx),
         meta=meta,
     )
-    estado = warm.estado_base(mf, "5", entidad, normalizacion, idx.ids, hiper)
+    estado = warm.estado_base(mf, "5", entidad, normalizacion, idx.ids, hiper,
+                              espacio=espacio)
     estado.sigma = float(sigma) if sigma is not None else None
     estado.costos = costos
     return modelo, estado

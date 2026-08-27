@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block titulo %}Crear cuenta · Scouting por similitud{% endblock %}
+
+{% block contenido %}
+  <section class="panel panel-login">
+    <h1>Crear cuenta</h1>
+    <p class="ayuda">
+      Buscar jugadores y equipos parecidos <strong>no necesita cuenta</strong>.
+      La cuenta hace falta para la sección
+      <a href="{{ url_for('datos.panel') }}">Datos y modelos</a>: incorporar
+      partidos nuevos y entrenar modelos con ellos, que son procesos que corren
+      en el servidor y ocupan disco.
+    </p>
+
+    {# Aquí sí se dice exactamente qué falla: todavía no hay ninguna cuenta que
+       proteger, y un error genérico dejaría al usuario probando a ciegas. #}
+    {% if error %}
+      <p class="aviso">{{ error }}</p>
+    {% endif %}
+
+    <form class="formulario" method="post" action="{{ url_for('auth.registro') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="siguiente" value="{{ siguiente }}">
+      <div class="campo campo-ancho">
+        <label for="usuario">Usuario</label>
+        <input type="text" id="usuario" name="usuario" required autofocus
+               autocomplete="username" autocapitalize="none" spellcheck="false"
+               maxlength="{{ max_largo_usuario }}" value="{{ escrito.usuario }}">
+        <p class="apunte">
+          Letras sin acentos, números, punto, guion y guion bajo. Es con lo que
+          entras; no se puede cambiar después.
+        </p>
+      </div>
+      <div class="campo campo-ancho">
+        <label for="nombre">Nombre visible <span class="apunte">(opcional)</span></label>
+        <input type="text" id="nombre" name="nombre" maxlength="60"
+               autocomplete="name" value="{{ escrito.nombre }}">
+        <p class="apunte">El que aparece en la cabecera. Por defecto, el usuario.</p>
+      </div>
+      <div class="campo campo-ancho">
+        <label for="contrasena">Contraseña</label>
+        <input type="password" id="contrasena" name="contrasena" required
+               minlength="{{ min_largo_contrasena }}" autocomplete="new-password">
+        <p class="apunte">
+          Mínimo {{ min_largo_contrasena }} caracteres. No se exigen mayúsculas ni
+          signos: lo que cuenta es la longitud.
+        </p>
+      </div>
+      <div class="campo campo-ancho">
+        <label for="contrasena2">Repite la contraseña</label>
+        <input type="password" id="contrasena2" name="contrasena2" required
+               minlength="{{ min_largo_contrasena }}" autocomplete="new-password">
+      </div>
+      <div class="botonera">
+        <button class="boton" type="submit">Crear cuenta y entrar</button>
+      </div>
+    </form>
+
+    <p class="apunte">
+      ¿Ya tienes una? <a href="{{ url_for('auth.login') }}">Inicia sesión</a>.
+    </p>
+  </section>
+{% endblock %}

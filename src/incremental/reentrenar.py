@@ -29,10 +29,16 @@ frio y mide cuanto se separan las dos S: es la comprobacion de que el warm start
 ahorra tiempo sin cambiar el resultado.
 
 `--servibles` reentrena exactamente la pareja que sirve la app
-(`config.MODELOS_SERVIBLES`: jugador con la F5 y equipo con la F2, las dos con
-z-score global) en vez del producto cartesiano de las tres flags. Es lo que lanza
-la seccion «Datos y modelos» de la interfaz: alli un modelo es una pareja
+(`config.MODELOS_SERVIBLES`: jugador con la F5 y z-score por liga, equipo con la
+F5 y z-score global) en vez del producto cartesiano de las tres flags. Es lo que
+lanza la seccion «Datos y modelos» de la interfaz: alli un modelo es una pareja
 jugador+equipo con nombre, no una combinacion metodologica suelta.
+
+Esas dos celdas —y solo esas— se ajustan ademas con los hiperparametros del
+artefacto servido (`config.HIPERPARAMETROS_SERVIBLES`), que no son los mismos en
+jugador y en equipo aunque compartan formulacion. Sin eso, un modelo entrenado
+desde la interfaz seria de otra familia que el base y los dos no se podrian
+comparar entre si.
 """
 
 from __future__ import annotations
@@ -45,10 +51,11 @@ from pathlib import Path
 
 import numpy as np
 
-from src.similitud import data, features, formulacion2, formulacion5, warm
+from src.similitud import data, distancias, features, formulacion2, formulacion5, warm
 from src.similitud.consulta import configurar_consola
+from src.similitud.distancias import DISTANCIAS_VALIDAS
 from src.similitud.features import NORMALIZACIONES_VALIDAS, EstadisticasNorm
-from src.similitud.modelo import ModeloSimilitud
+from src.similitud.modelo import ModeloSimilitud, stem_artefacto
 
 from . import config
 
@@ -75,8 +82,10 @@ def _barra(etiqueta: str, cada: int = 5):
 
 # --- Estado previo ------------------------------------------------------------
 def _cargar_estado(model_dir: Path, formulacion: str, entidad: str,
-                   normalizacion: str) -> warm.EstadoWarm | None:
-    ruta = warm.ruta_estado(model_dir, formulacion, entidad, normalizacion)
+                   normalizacion: str,
+                   distancia: str = distancias.POR_DEFECTO) -> warm.EstadoWarm | None:
+    ruta = warm.ruta_estado(model_dir, formulacion, entidad, normalizacion,
+                            distancia)
     if not ruta.exists():
         return None
     try:
@@ -87,14 +96,17 @@ def _cargar_estado(model_dir: Path, formulacion: str, entidad: str,
 
 
 def _cargar_estadisticas(model_dir: Path, formulacion: str, entidad: str,
-                         normalizacion: str) -> EstadisticasNorm | None:
+                         normalizacion: str,
+                         distancia: str = distancias.POR_DEFECTO
+                         ) -> EstadisticasNorm | None:
     """mu/sd del modelo anterior, si las lleva.
 
     Los artefactos construidos antes de existir el flujo incremental no las
     tienen: en ese caso no hay nada que congelar y se recalculan, lo que mueve
     todos los vectores y deja el warm start en una simple inicializacion.
     """
-    path = Path(model_dir) / f"formulacion{formulacion}_{entidad}_{normalizacion}.json"
+    stem = stem_artefacto(formulacion, entidad, normalizacion, distancia)
+    path = Path(model_dir) / f"{stem}.json"
     if not path.exists():
         return None
     try:
@@ -142,15 +154,49 @@ def reentrenar_uno(
     frio: bool = False,
     verificar: bool = False,
     refrescar_kernel: bool = False,
+    distancia: str = distancias.POR_DEFECTO,
 ) -> dict:
-    """Reentrena un (formulacion, entidad, normalizacion) y devuelve su informe."""
-    etiqueta = f"formulacion {formulacion} | {entidad} | {normalizacion}"
-    print(f"\n[{etiqueta}]")
+    """Reentrena un (formulacion, entidad, normalizacion, distancia) y lo informa.
+
+    Si la celda es la que SIRVE la app para esa entidad
+    (`config.MODELOS_SERVIBLES`), se ajusta con los hiperparametros del artefacto
+    servido (`config.HIPERPARAMETROS_SERVIBLES`) y no con los defaults del
+    modulo: jugador y equipo comparten formulacion con valores distintos, asi que
+    los defaults solo pueden reproducir uno de los dos. Es lo que hace que el
+    boton «Entrenar» de /datos genere modelos de la misma familia que el base.
+    """
+    print(f"\n[formulacion {formulacion} | {entidad} | {normalizacion} "
+          f"| {distancia}]")
+    with config.hiperparametros_servibles(
+            entidad, formulacion, normalizacion, distancia) as puestos:
+        if puestos:
+            print("    celda servible: "
+                  + ", ".join(f"{k}={v}" for k, v in puestos.items()))
+        return _reentrenar_uno(
+            db_path, model_dir, out_dir, formulacion, entidad, normalizacion,
+            frio=frio, verificar=verificar, refrescar_kernel=refrescar_kernel,
+            distancia=distancia)
+
+
+def _reentrenar_uno(
+    db_path: Path,
+    model_dir: Path,
+    out_dir: Path,
+    formulacion: str,
+    entidad: str,
+    normalizacion: str,
+    frio: bool = False,
+    verificar: bool = False,
+    refrescar_kernel: bool = False,
+    distancia: str = distancias.POR_DEFECTO,
+) -> dict:
+    """El reentrenamiento en si, ya con la configuracion de la celda puesta."""
     t0 = time.perf_counter()
 
-    previo = None if frio else _cargar_estado(model_dir, formulacion, entidad, normalizacion)
+    previo = None if frio else _cargar_estado(
+        model_dir, formulacion, entidad, normalizacion, distancia)
     congeladas = None if frio else _cargar_estadisticas(
-        model_dir, formulacion, entidad, normalizacion)
+        model_dir, formulacion, entidad, normalizacion, distancia)
     if not frio:
         if previo is None:
             print("    sin estado previo: ajuste en frio (se guardara para la proxima)")
@@ -169,7 +215,7 @@ def reentrenar_uno(
     t_ajuste = time.perf_counter()
     modelo, estado = modulo.construir_con_estado(
         mf, entidad, normalizacion, previo=previo, progreso=_barra("ajuste"),
-        congelar_kernel=not refrescar_kernel)
+        congelar_kernel=not refrescar_kernel, distancia=distancia)
     ajuste = time.perf_counter() - t_ajuste
     segundos = time.perf_counter() - t0
 
@@ -182,13 +228,15 @@ def reentrenar_uno(
           f"{info_warm.get('entidades_nuevas', 0)} entidades nuevas")
 
     path = modelo.guardar(out_dir)
-    estado.guardar(warm.ruta_estado(out_dir, formulacion, entidad, normalizacion))
+    estado.guardar(
+        warm.ruta_estado(out_dir, formulacion, entidad, normalizacion, distancia))
     print(f"    guardado en {path}  ({segundos:.1f}s, de los cuales {ajuste:.1f}s de ajuste)")
 
     informe = {
         "formulacion": formulacion,
         "entidad": entidad,
         "normalizacion": normalizacion,
+        "distancia": distancia,
         "segundos": round(segundos, 1),
         "segundos_ajuste": round(ajuste, 1),
         "n_observaciones": int(mf.X.shape[0]),
@@ -203,7 +251,8 @@ def reentrenar_uno(
         # que el tiempo sea comparable con `segundos_ajuste` de arriba.
         mf_frio = features.construir(df, entidad, normalizacion=normalizacion)
         t1 = time.perf_counter()
-        modelo_frio, _ = modulo.construir_con_estado(mf_frio, entidad, normalizacion)
+        modelo_frio, _ = modulo.construir_con_estado(
+            mf_frio, entidad, normalizacion, distancia=distancia)
         ajuste_frio = time.perf_counter() - t1
         informe["frio"] = {
             "segundos_ajuste": round(ajuste_frio, 1),
@@ -220,26 +269,35 @@ def reentrenar_uno(
 
 
 # --- CLI ----------------------------------------------------------------------
-def _combinaciones(args) -> list[tuple[str, str, str]]:
-    """(entidad, formulacion, normalizacion) que hay que reentrenar.
+def _combinaciones(args) -> list[tuple[str, str, str, str]]:
+    """(entidad, formulacion, normalizacion, distancia) que hay que reentrenar.
 
     Con `--servibles` es la pareja de `config.MODELOS_SERVIBLES` —una entidad,
     una formulacion, una normalizacion— y no el producto cartesiano: cada entidad
-    tiene su propia formulacion, asi que no se puede expresar con las tres flags.
+    tiene su propia normalizacion (y podria tener su propia formulacion), asi que
+    no se puede expresar con las flags. La distancia ahi es la que sirve la app
+    (`config.DISTANCIA_SERVIBLE`, hoy `mahalanobis`), no la euclidea por defecto:
+    el boton «Entrenar» de /datos no elige geometria igual que no elige formulacion,
+    y lo que tiene que producir es un modelo de la MISMA familia que el servido.
     """
     if args.servibles:
-        return [(e, f, n) for e, (f, n) in config.MODELOS_SERVIBLES.items()]
+        return [(e, f, n, config.DISTANCIA_SERVIBLE)
+                for e, (f, n) in config.MODELOS_SERVIBLES.items()]
     formulaciones = ["2", "5"] if args.formulacion == "ambas" else [args.formulacion]
     entidades = ["jugador", "equipo"] if args.entidad == "ambas" else [args.entidad]
     normalizaciones = (
         list(NORMALIZACIONES_VALIDAS) if args.normalizacion == "ambas"
         else [args.normalizacion]
     )
+    distancias_sel = (
+        list(DISTANCIAS_VALIDAS) if args.distancia == "todas" else [args.distancia]
+    )
     return [
-        (entidad, formulacion, normalizacion)
+        (entidad, formulacion, normalizacion, distancia)
         for entidad in entidades
         for formulacion in formulaciones
         for normalizacion in normalizaciones
+        for distancia in distancias_sel
     ]
 
 
@@ -262,6 +320,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--entidad", choices=["jugador", "equipo", "ambas"], default="ambas")
     p.add_argument("--normalizacion", choices=[*NORMALIZACIONES_VALIDAS, "ambas"],
                    default="ambas")
+    p.add_argument("--distancia", choices=[*DISTANCIAS_VALIDAS, "todas"],
+                   default=distancias.POR_DEFECTO,
+                   help="Distancia entre observaciones de los modelos a "
+                        "reentrenar. Por defecto la euclidea, que es la geometria "
+                        "historica del pipeline; los de otra geometria viven en "
+                        "ficheros con sufijo y se reentrenan por separado. La "
+                        "ignora --servibles, que usa siempre la que sirve la app.")
     p.add_argument("--frio", action="store_true",
                    help="Ignora el estado previo y las mu/sd guardadas: ajuste desde cero.")
     p.add_argument("--verificar", action="store_true",
@@ -290,11 +355,11 @@ def main(argv: list[str] | None = None) -> int:
 
     informes = []
     t0 = time.perf_counter()
-    for entidad, formulacion, normalizacion in combinaciones:
+    for entidad, formulacion, normalizacion, distancia in combinaciones:
         informes.append(reentrenar_uno(
             args.db, args.modelos, out_dir, formulacion, entidad,
             normalizacion, frio=args.frio, verificar=args.verificar,
-            refrescar_kernel=args.refrescar_kernel))
+            refrescar_kernel=args.refrescar_kernel, distancia=distancia))
 
     destino = Path(out_dir) / "reentrenamiento.json"
     destino.write_text(

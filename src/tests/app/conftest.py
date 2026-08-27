@@ -13,13 +13,17 @@ posición y las métricas con las que se reconstruyen los valores reales.
 from __future__ import annotations
 
 import json
+import secrets
 from contextlib import closing
 from pathlib import Path
 
 import numpy as np
 import pytest
+from flask.testing import FlaskClient
 
 from src.app import config as config_app
+from src.similitud import config as config_similitud
+from src.similitud import distancias
 from src.app.factoria import crear_app
 from src.extraccion import database
 from src.extraccion.config import POSITIONS_25
@@ -137,7 +141,8 @@ def _S(n: int) -> np.ndarray:
 
 
 def _modelo(
-    entidad: str, formulacion: str, normalizacion: str, extra: bool = False
+    entidad: str, formulacion: str, normalizacion: str, extra: bool = False,
+    distancia: str = distancias.POR_DEFECTO,
 ) -> ModeloSimilitud:
     filas = JUGADORES if entidad == "jugador" else EQUIPOS
     if extra:
@@ -157,6 +162,7 @@ def _modelo(
         feat_display=display * (1.0 if formulacion == "5" else -1.0),
         meta={
             "normalizacion": normalizacion,
+            "distancia": distancia,
             "descripcion": f"modelo sintetico F{formulacion}",
             "ligas_por_entidad": {str(i): [LIGAS[entidad]] for i in ids},
         },
@@ -168,8 +174,11 @@ def dir_modelos(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Directorio de modelos con la misma forma que deja el pipeline real.
 
     En la raiz, las 8 combinaciones que construye `src.similitud.build` (2
-    formulaciones x 2 entidades x 2 normalizaciones): la app solo sirve la pareja
-    de `config.MODELO_BASE`, pero el resto existe en disco y no debe estorbarle.
+    formulaciones x 2 entidades x 2 normalizaciones) en la geometria por defecto,
+    MAS la pareja servible en `DISTANCIA_SERVIBLE`: la app solo sirve esa pareja,
+    pero el resto existe en disco y no debe estorbarle. Las dos cosas importan
+    aqui, porque la distancia forma parte del NOMBRE del artefacto
+    (`modelo.stem_artefacto`) y el catalogo lo compone con la servible.
 
     Y en `variantes/`, un modelo con nombre como el que deja un reentrenamiento
     desde la interfaz: solo la pareja servible, con su `variante.json` y con una
@@ -181,6 +190,10 @@ def dir_modelos(tmp_path_factory: pytest.TempPathFactory) -> Path:
         for formulacion in ("2", "5"):
             for normalizacion in ("por_liga", "global"):
                 _modelo(entidad, formulacion, normalizacion).guardar(destino)
+    for entidad, (formulacion, normalizacion) in config_app.MODELO_BASE.items():
+        if config_similitud.DISTANCIA_SERVIBLE != distancias.POR_DEFECTO:
+            _modelo(entidad, formulacion, normalizacion,
+                    distancia=config_similitud.DISTANCIA_SERVIBLE).guardar(destino)
 
     carpeta = destino / config_app.SUBDIR_VARIANTES / VARIANTE_SLUG
     carpeta.mkdir(parents=True)
@@ -197,7 +210,8 @@ def dir_modelos(tmp_path_factory: pytest.TempPathFactory) -> Path:
         encoding="utf-8",
     )
     for entidad, (formulacion, normalizacion) in config_app.MODELO_BASE.items():
-        _modelo(entidad, formulacion, normalizacion, extra=True).guardar(carpeta)
+        _modelo(entidad, formulacion, normalizacion, extra=True,
+                distancia=config_similitud.DISTANCIA_SERVIBLE).guardar(carpeta)
     return destino
 
 
@@ -320,25 +334,204 @@ def bd_ligas(bd: Path) -> Path:
     return bd
 
 
+# --- Modelos construidos de verdad (para la proyeccion) -----------------------
+# Los artefactos escritos a mano de arriba bastan para casi todo, pero NO para
+# probar que una entidad de la BD que no esta en el modelo recibe
+# recomendaciones: proyectarla exige que el artefacto traiga las mu/sd con las que
+# se estandarizo, su estado warm y EXACTAMENTE las columnas que produce la capa de
+# features. Nada de eso se puede falsificar sin reimplementar el pipeline, asi que
+# para esas pruebas se construye un modelo de verdad sobre la BD sintetica (7
+# jugadores y 3 equipos: tarda menos de un segundo).
+
+@pytest.fixture(scope="session")
+def dir_modelos_reales(tmp_path_factory: pytest.TempPathFactory, bd: Path) -> Path:
+    """Modelos del pipeline real ajustados sobre la BD sintetica BASE.
+
+    Se entrenan con la base y no con la ampliada a proposito: asi `FICHAJE` y
+    `EQUIPO_NUEVO` existen en el conjunto ampliado y NO en el modelo, que es la
+    situacion que se quiere probar (elegir esa BD y preguntar por ellos).
+
+    Se ajustan DENTRO de `hiperparametros_servibles`, que es lo que hacen
+    `build.main` y `src.incremental.reentrenar` con estas mismas celdas: sin eso
+    el artefacto de equipo saldria con el `F5_METODO_EQUIPO` por defecto del
+    modulo (`sinkhorn`) en vez del `mmd` del modelo servido, y ni siquiera seria
+    proyectable (`foldin.METODOS_PROYECTABLES`). El fixture tiene que producir lo
+    que la app sirve de verdad, no una variante de la misma celda.
+    """
+    from src.similitud import config as config_sim
+    from src.similitud.build import _construir_uno
+
+    destino = tmp_path_factory.mktemp("modelos_reales")
+    for entidad, (formulacion, normalizacion) in config_app.MODELO_BASE.items():
+        with config_sim.hiperparametros_servibles(
+                entidad, formulacion, normalizacion):
+            _construir_uno(bd, destino, formulacion, entidad, normalizacion,
+                           distancia=config_sim.DISTANCIA_SERVIBLE)
+    return destino
+
+
 @pytest.fixture
-def app(dir_modelos: Path, bd: Path):
-    return crear_app(dir_modelos, db_path=bd, testing=True)
+def app_real(dir_modelos_reales: Path, bd: Path, fichero_usuarios: Path):
+    """App servida con los modelos reales (la que sabe proyectar)."""
+    creada = crear_app(dir_modelos_reales, db_path=bd,
+                       ruta_usuarios=fichero_usuarios, testing=True)
+    creada.test_client_class = ClienteConCSRF
+    return creada
+
+
+@pytest.fixture
+def cliente_real(app_real):
+    """Cliente autenticado sobre los modelos reales."""
+    c = app_real.test_client()
+    entrar(c)
+    return c
+
+
+# --- Cuentas ------------------------------------------------------------------
+# Dos usuarios, porque casi todo lo que hay que comprobar del aislamiento es una
+# relacion entre DOS cuentas: que una no vea lo de la otra, que el base lo vean
+# las dos, que el mensaje de «ocupado» no delate de quien es la tarea.
+USUARIO_A = "ana"
+NOMBRE_A = "Ana Ruiz"
+USUARIO_B = "bruno"
+NOMBRE_B = "Bruno Diaz"
+CONTRASENA = "contrasena-de-prueba"
+
+
+@pytest.fixture
+def fichero_usuarios(tmp_path: Path) -> Path:
+    """Registro con las dos cuentas de prueba, ya con su hash."""
+    from src.app.auth import Usuarios, crear_usuario
+
+    ruta = tmp_path / "usuarios.json"
+    almacen = Usuarios(ruta)
+    almacen.guardar(crear_usuario(USUARIO_A, NOMBRE_A, CONTRASENA))
+    almacen.guardar(crear_usuario(USUARIO_B, NOMBRE_B, CONTRASENA))
+    return ruta
+
+
+class ClienteConCSRF(FlaskClient):
+    """Cliente que adjunta el token CSRF a los POST, como haría un navegador.
+
+    Sin esto, cada prueba que envia un formulario tendria que raspar el token de
+    la pagina primero: ruido que no prueba nada y que se olvidaria a la tercera.
+    El navegador tampoco lo escribe a mano — lo lleva el campo oculto de la
+    plantilla.
+
+    Para comprobar el RECHAZO hay que poder enviar sin el, y para eso esta
+    `sin_csrf=True`, que salta la inyeccion.
+    """
+
+    def post(self, *args, **kwargs):
+        if kwargs.pop("sin_csrf", False):
+            return super().post(*args, **kwargs)
+        datos = kwargs.get("data")
+        if datos is None:
+            kwargs["data"] = {"csrf_token": token_csrf(self)}
+        elif isinstance(datos, dict) and "csrf_token" not in datos:
+            kwargs["data"] = {**datos, "csrf_token": token_csrf(self)}
+        return super().post(*args, **kwargs)
+
+
+@pytest.fixture
+def app(dir_modelos: Path, bd: Path, fichero_usuarios: Path):
+    creada = crear_app(dir_modelos, db_path=bd, ruta_usuarios=fichero_usuarios,
+                       testing=True)
+    creada.test_client_class = ClienteConCSRF
+    return creada
+
+
+def entrar(cliente_flask, usuario: str = USUARIO_A,
+           contrasena: str = CONTRASENA) -> None:
+    """Inicia sesion por el mismo camino que un navegador.
+
+    Se pasa por el formulario en vez de escribir la cookie de sesion a mano: asi
+    las pruebas ejercitan tambien el CSRF del login y la renovacion de sesion, y
+    no se quedan probando un atajo que la app real no usa.
+    """
+    respuesta = cliente_flask.post("/login", data={
+        "usuario": usuario, "contrasena": contrasena,
+        "csrf_token": token_csrf(cliente_flask),
+    })
+    assert respuesta.status_code == 302, "no se pudo iniciar sesion en el fixture"
+
+
+def token_csrf(cliente_flask) -> str:
+    """Token CSRF valido para la sesion de ese cliente.
+
+    Se lee de la propia sesion firmada, no raspando el HTML: la pagina de login
+    solo trae el campo oculto cuando NO hay sesion (con sesion redirige), asi que
+    raspar solo funcionaria antes de entrar. Si la sesion aun no tiene token, se
+    siembra uno — que es exactamente lo que hace `csrf.token()` al renderizar el
+    primer formulario.
+
+    Que las plantillas escriben el campo, y que sin el se rechaza, se comprueba
+    aparte en `test_csrf.py`: eso es lo que este atajo no debe tapar.
+    """
+    from src.app import csrf
+
+    with cliente_flask.session_transaction() as sesion:
+        valor = sesion.get(csrf.CLAVE_SESION)
+        if not valor:
+            valor = secrets.token_urlsafe(32)
+            sesion[csrf.CLAVE_SESION] = valor
+    return valor
+
+
+def cliente_autenticado(app_flask, usuario: str = USUARIO_A):
+    """Cliente con sesion sobre una app montada a mano en una prueba.
+
+    Varias pruebas necesitan una app propia (un directorio de modelos raro, sin
+    BD, con un conjunto que ya no esta): esto les ahorra repetir las tres lineas
+    de siempre y, sobre todo, evita que se olviden de entrar y acaben
+    comprobando el 302 al login en vez de lo que querian probar.
+    """
+    app_flask.test_client_class = ClienteConCSRF
+    c = app_flask.test_client()
+    entrar(c, usuario)
+    return c
 
 
 @pytest.fixture
 def cliente(app):
+    """Cliente YA autenticado como `USUARIO_A`.
+
+    La app entera exige sesion, asi que este es el cliente por defecto: las
+    pruebas que existian antes de haber cuentas siguen escritas igual.
+    """
+    c = app.test_client()
+    entrar(c)
+    return c
+
+
+@pytest.fixture
+def cliente_b(app):
+    """Cliente autenticado como la SEGUNDA cuenta (para el aislamiento)."""
+    c = app.test_client()
+    entrar(c, USUARIO_B)
+    return c
+
+
+@pytest.fixture
+def cliente_anonimo(app):
+    """Cliente sin sesion: lo que ve quien no ha entrado."""
     return app.test_client()
 
 
 @pytest.fixture
-def app_sin_bd(dir_modelos: Path, tmp_path: Path):
+def app_sin_bd(dir_modelos: Path, tmp_path: Path, fichero_usuarios: Path):
     """La BD es opcional: la app tiene que servir igual sin ella."""
-    return crear_app(dir_modelos, db_path=tmp_path / "no_existe.db", testing=True)
+    creada = crear_app(dir_modelos, db_path=tmp_path / "no_existe.db",
+                       ruta_usuarios=fichero_usuarios, testing=True)
+    creada.test_client_class = ClienteConCSRF
+    return creada
 
 
 @pytest.fixture
 def cliente_sin_bd(app_sin_bd):
-    return app_sin_bd.test_client()
+    c = app_sin_bd.test_client()
+    entrar(c)
+    return c
 
 
 @pytest.fixture

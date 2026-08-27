@@ -28,7 +28,7 @@ def esperar(gestor: GestorTareas, limite: float = 20.0) -> Tarea:
     fin = time.time() + limite
     while time.time() < fin and gestor.en_curso() is not None:
         time.sleep(0.02)
-    ultima = gestor.ultima()
+    ultima = gestor.ultima(None)
     assert ultima is not None
     return ultima
 
@@ -63,10 +63,16 @@ def test_lee_el_avance_de_la_ingesta():
     assert "12" in paso and "306" in paso
 
 
-def test_lee_la_etiqueta_del_modelo_en_curso():
-    progreso, paso = _leer_progreso("[formulacion 2 | jugador | por_liga]")
-    assert progreso is None
-    assert paso == "formulacion 2 | jugador | por_liga"
+def test_no_se_lee_el_artefacto_que_se_esta_ajustando():
+    """`[formulacion 2 | jugador | por_liga]` es reparto interno del pipeline.
+
+    Quien entrena desde la interfaz elige nombre y conjunto de datos, no
+    formulación, ni entidad, ni normalización: enseñárselas era vocabulario sobre
+    el que no decide nada. La línea sigue llegando del CLI; simplemente no pone
+    paso.
+    """
+    assert _leer_progreso("[formulacion 2 | jugador | por_liga]") == (None, "")
+    assert _leer_progreso("[formulacion 5 | equipo | global]") == (None, "")
 
 
 def test_una_linea_cualquiera_no_aporta_progreso():
@@ -171,18 +177,45 @@ def test_las_tareas_guardadas_no_crecen_sin_limite(tmp_path: Path, monkeypatch):
     for i in range(6):
         gestor.lanzar("ingerir", f"tarea {i}", [])
     assert len(gestor._tareas) == 3
-    assert gestor.ultima().titulo == "tarea 5"
+    assert gestor.ultima(None).titulo == "tarea 5"
 
 
 def test_sin_tareas_no_hay_ultima(tmp_path: Path):
     gestor = GestorTareas(cwd=tmp_path)
-    assert gestor.ultima() is None and gestor.en_curso() is None
+    assert gestor.ultima(None) is None and gestor.en_curso() is None
 
 
 def test_el_dict_es_serializable_y_completo(gestor_py: GestorTareas):
     tarea = lanzar_python(gestor_py, "print('ok')")
     datos = tarea.como_dict()
     assert datos["estado"] == "terminada"
-    assert datos["lineas"] == ["ok"]
-    assert isinstance(datos["comando"], str)
+    assert datos["progreso"] == 1.0
     assert datos["segundos"] >= 0
+
+
+def test_el_dict_no_lleva_ni_el_log_ni_el_comando(gestor_py: GestorTareas):
+    """La página no tiene consola donde pintarlos y los dos llevan rutas del
+    servidor: se leen, se usan para deducir progreso y error, y ahí se quedan."""
+    tarea = lanzar_python(gestor_py, "print('ruta secreta del servidor')")
+    datos = tarea.como_dict()
+    assert "lineas" not in datos and "comando" not in datos
+    # Pero el gestor sí las conserva: de ahí sale el progreso y el error.
+    assert tarea.lineas == ["ruta secreta del servidor"]
+
+
+def test_una_tarea_que_va_bien_no_tiene_error(gestor_py: GestorTareas):
+    assert lanzar_python(gestor_py, "print('ok')").error == ""
+
+
+def test_una_tarea_fallida_explica_por_que_en_una_linea(gestor_py: GestorTareas):
+    """Sin log en pantalla, esta línea es lo único que le dice al usuario si se
+    equivocó de carpeta o se quedó sin disco."""
+    tarea = lanzar_python(
+        gestor_py, "import sys; print('no existe la carpeta'); sys.exit(2)")
+    assert tarea.error == "no existe la carpeta"
+    assert tarea.como_dict()["error"] == "no existe la carpeta"
+
+
+def test_una_tarea_fallida_sin_salida_dice_al_menos_el_codigo(gestor_py: GestorTareas):
+    tarea = lanzar_python(gestor_py, "import sys; sys.exit(7)")
+    assert tarea.error == "La tarea terminó con código 7."

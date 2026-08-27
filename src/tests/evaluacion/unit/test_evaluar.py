@@ -155,16 +155,23 @@ class TestEjecutar:
                                   {"0"}, bootstrap=0)
         assert salida["f0"] and not salida["f1"] and not salida["f5"]
 
-    def test_cada_fila_lleva_los_tres_ejes_del_modelo(self, modelos, dobles) -> None:
+    def test_cada_fila_lleva_los_cuatro_ejes_del_modelo(self, modelos, dobles) -> None:
         """La etiqueta compacta no dice de que eje viene cada palabra; los CSV se
-        cruzan luego por formulacion/entidad/normalizacion.
+        cruzan luego por formulacion/entidad/normalizacion/distancia.
         """
         salida = evaluar.ejecutar(modelos, {("equipo", "por_liga"): None}, {}, {},
                                   {"0"}, bootstrap=0)
         fila = salida["f0"][0]
-        assert fila["modelo"] == "F5_equipo_por_liga"
-        assert (fila["formulacion"], fila["entidad"], fila["normalizacion"]) == (
-            "5", "equipo", "por_liga")
+        assert fila["modelo"] == "F5_equipo_por_liga_euclidea"
+        assert (fila["formulacion"], fila["entidad"], fila["normalizacion"],
+                fila["distancia"]) == ("5", "equipo", "por_liga", "euclidea")
+
+    def test_la_distancia_evaluada_viaja_a_cada_fila(self, modelos, dobles) -> None:
+        """Sin ella, las filas de dos geometrias serian indistinguibles en el CSV."""
+        salida = evaluar.ejecutar(modelos, {("equipo", "por_liga"): None}, {}, {},
+                                  {"0"}, bootstrap=0, distancia="manhattan")
+        assert salida["f0"][0]["modelo"] == "F5_equipo_por_liga_manhattan"
+        assert salida["f0"][0]["distancia"] == "manhattan"
 
     def test_la_fase_1_emite_las_tres_direcciones_y_los_estratos(
         self, modelos, dobles
@@ -206,7 +213,7 @@ class TestEjecutar:
                                             for n in ("por_liga", "global")},
                                   {}, {}, {"0"}, bootstrap=0)
         assert {b["modelo"] for b in salida["face"]} == {
-            "F2_equipo_por_liga", "F5_equipo_por_liga"}
+            "F2_equipo_por_liga_euclidea", "F5_equipo_por_liga_euclidea"}
 
     def test_ignora_las_celdas_de_la_rejilla_sin_artefacto(self, dobles) -> None:
         salida = evaluar.ejecutar({}, {}, {}, {}, {"0", "1", "5"}, bootstrap=5)
@@ -237,8 +244,7 @@ class TestEscribirCsv:
     def salida(self) -> dict:
         base = {"modelo": "F5_equipo_global", "formulacion": "5",
                 "entidad": "equipo", "normalizacion": "global"}
-        vacio = {k: [] for k in ("f0", "f1", "f1_estratos", "f2", "f3", "f4", "f5",
-                                 "face")}
+        vacio = evaluar.tablas_vacias()
         return {**vacio, "f0": [{**base, "asimetria": 0.2}]}
 
     def test_escribe_un_csv_por_tabla_con_filas(self, salida, tmp_path: Path) -> None:
@@ -280,13 +286,20 @@ class TestFormatoDelInforme:
 
     def test_la_cabecera_abre_por_los_ejes_del_modelo(self) -> None:
         cab, sep = evaluar._cab_id("top-1")
-        assert cab == "| formulacion | entidad | normalizacion | top-1 |"
-        assert sep == "|---|---|---|---|"
+        assert cab == "| formulacion | entidad | normalizacion | distancia | top-1 |"
+        assert sep == "|---|---|---|---|---|"
 
-    def test_la_fila_identifica_el_modelo_por_sus_tres_ejes(self) -> None:
+    def test_la_fila_identifica_el_modelo_por_sus_cuatro_ejes(self) -> None:
+        fila = evaluar._id({"formulacion": "2", "entidad": "jugador",
+                            "normalizacion": "global", "distancia": "coseno"})
+        assert fila == "| F2 | jugador | global | coseno |"
+
+    def test_una_fila_sin_distancia_se_lee_como_euclidea(self) -> None:
+        """Filas de una evaluacion anterior a que la geometria fuera un eje: era
+        la unica que habia, asi que se declara en vez de dejar el hueco."""
         fila = evaluar._id({"formulacion": "2", "entidad": "jugador",
                             "normalizacion": "global"})
-        assert fila == "| F2 | jugador | global |"
+        assert fila == "| F2 | jugador | global | euclidea |"
 
 
 class TestResumenFeatures:
@@ -314,7 +327,15 @@ class TestEscribirInforme:
     def salida(self) -> dict:
         base = {"modelo": "F5_equipo_global", "formulacion": "5",
                 "entidad": "equipo", "normalizacion": "global"}
+        generalizacion = {**base, "holdout": "9-27", "fidelidad": "fiel",
+                          "n_train": 20, "n_holdout": 5, "n_entidades": 5,
+                          "top1": 0.4, "mrr": 0.5, "pureza_top1": 0.8,
+                          "knn_accuracy": 0.75, "rbo_medio": float("nan"),
+                          "coverage": 0.6, "diversity": 2.0, "n_rol": 5,
+                          "distintos_top1": 4, "score_top1": 0.9,
+                          "pool_autosim": 5}
         return {
+            **evaluar.tablas_vacias(),
             "f0": [{**base, "asimetria": 0.02, "pureza_top1": 0.95, "n_pureza": 10}],
             "f1": [{**base, "direccion": "global", "pool": 20, "azar_top1": 0.05,
                     "top1": 0.5, "top5": 0.8, "top10": 0.9, "mrr": 0.6}],
@@ -330,6 +351,9 @@ class TestEscribirInforme:
             "f5": [{**base, "knn_accuracy": 0.7, "knn_f1_macro": 0.65,
                     "coverage": 0.9, "diversity": 2.4,
                     "popularidad_spearman": 0.1}],
+            "f7": [{**generalizacion, "ambito": "dentro"},
+                   {**generalizacion, "ambito": "fuera", "pureza_top1": 0.6,
+                    "knn_accuracy": 0.5, "top1": 0.2, "rbo_medio": 0.7}],
             "face": [{"modelo": "F5_equipo_global", "lineas": ["  A -> B, C"]}],
         }
 
@@ -343,8 +367,26 @@ class TestEscribirInforme:
     def test_escribe_una_seccion_por_fase(self, salida, tmp_path: Path) -> None:
         texto = self._texto(salida, tmp_path)
         for titulo in ("Fase 0", "Fase 1", "Fase 2", "Fase 3", "Fase 4", "Fase 5",
-                       "Fase 6"):
+                       "Fase 6", "Fase 7"):
             assert titulo in texto
+
+    def test_la_fase_7_escribe_cada_metrica_dentro_y_fuera(
+        self, salida, tmp_path: Path
+    ) -> None:
+        """La tabla es lo que deja leer la caida sin calcularla a mano, y lo que
+        distingue una metrica que no se pudo medir de una que salio mal."""
+        texto = self._texto(salida, tmp_path)
+        assert "| dentro | fuera | caida |" in texto
+        assert "0.250" in texto        # kNN 0.75 dentro - 0.50 fuera
+        assert "el criterio VIAJA" not in texto   # 25 % supera el umbral
+
+    def test_la_estabilidad_solo_sale_fuera_de_muestra(
+        self, salida, tmp_path: Path
+    ) -> None:
+        """Dentro es la Fase 2 sobre el modelo entero: aqui se escribe n/a en vez
+        de una cifra que no seria comparable."""
+        texto = self._texto(salida, tmp_path)
+        assert "| estabilidad RBO@10 | n/a | 0.700 | n/a |" in texto
 
     def test_explica_los_tres_ejes_que_identifican_al_modelo(
         self, salida, tmp_path: Path
@@ -398,16 +440,14 @@ class TestEscribirInforme:
         assert "no es automatizable" in self._texto(salida, tmp_path).lower()
 
     def test_un_informe_sin_resultados_sigue_siendo_valido(self, tmp_path: Path) -> None:
-        vacio = {k: [] for k in ("f0", "f1", "f1_estratos", "f2", "f3", "f4", "f5",
-                                 "face")}
+        vacio = evaluar.tablas_vacias()
         texto = self._texto(vacio, tmp_path)
         assert "Fase 6" in texto
         assert "Fase 0" not in texto
 
     def test_una_pureza_no_finita_no_produce_veredicto(self, tmp_path: Path) -> None:
         """Con solo modelos de equipo la pureza es NaN en todos: no hay minimo."""
-        salida = {k: [] for k in ("f0", "f1", "f1_estratos", "f2", "f3", "f4", "f5",
-                                  "face")}
+        salida = evaluar.tablas_vacias()
         salida["f0"] = [{"modelo": "F5_equipo_global", "formulacion": "5",
                          "entidad": "equipo", "normalizacion": "global",
                          "asimetria": 0.01, "pureza_top1": float("nan"),

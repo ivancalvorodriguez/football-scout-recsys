@@ -60,6 +60,29 @@ def minutos_por_jugador(db_path: Path) -> dict[int, float]:
     return {int(p): float(m) for p, m in zip(df["player_id"], df["min"])}
 
 
+def ligas_por_clave(db_path: Path) -> dict[str, str]:
+    """Mapa `competition-season` -> nombre legible de las ligas de la BD.
+
+    La clave es la misma que usa el pipeline para estandarizar por liga
+    (`similitud.data.LEAGUE_KEY`), y es la que identifica a una liga en la Fase 7.
+    El nombre solo sirve para poder escribir `--holdout india` en vez de
+    `--holdout 1238-108` y para que el informe diga de que liga habla.
+    """
+    df = _leer(
+        "SELECT DISTINCT m.competition_id AS c, m.season_id AS s, "
+        "co.competition_name AS comp, se.season_name AS temp "
+        "FROM matches m "
+        "LEFT JOIN competitions co ON co.competition_id = m.competition_id "
+        "LEFT JOIN seasons se ON se.season_id = m.season_id",
+        db_path,
+    )
+    salida: dict[str, str] = {}
+    for fila in df.itertuples(index=False):
+        nombre = " ".join(str(x) for x in (fila.comp, fila.temp) if x)
+        salida[f"{int(fila.c)}-{int(fila.s)}"] = nombre or f"{fila.c}-{fila.s}"
+    return salida
+
+
 def terciles(valores: np.ndarray) -> np.ndarray:
     """Etiqueta cada valor como 0=cola, 1=torso, 2=cabeza por terciles."""
     if valores.size == 0:

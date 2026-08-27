@@ -25,10 +25,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.similitud import distancias
 from src.similitud.consulta import configurar_consola
 from src.similitud.modelo import cargar_modelo
+from src.similitud.warm import EstadoWarm
 
-from . import config, construccion, datos, fases
+from . import config, construccion, datos, fases, generalizacion
+from .config import config_temporal
 
 configurar_consola()
 
@@ -153,12 +156,19 @@ def cargar_modelos(
     formulaciones: tuple[str, ...] = config.FORMULACIONES,
     entidades: tuple[str, ...] = config.ENTIDADES,
     normalizaciones: tuple[str, ...] = config.NORMALIZACIONES,
+    distancia: str = distancias.POR_DEFECTO,
 ) -> dict:
     """Carga los artefactos presentes en la rejilla (clave = tripleta).
 
     `formulaciones`/`entidades`/`normalizaciones` acotan la rejilla; por defecto,
     entera. Acotarla evita avisar de modelos que no se pidieron —y, en el barrido,
     cargar los que dejo en disco una ejecucion anterior con otro alcance.
+
+    `distancia` es SINGULAR y no acota nada: elige QUE juego de artefactos se
+    carga. La clave sigue siendo la tripleta porque quien consume esto (la Fase 3)
+    compara F2 contra F5 y una normalizacion contra la otra DENTRO de una misma
+    geometria; triangular dos distancias entre si seria otro experimento. Quien
+    quiera varias las recorre por fuera, un juego cada vez (ver `main`).
     """
     modelos: dict = {}
     for form in formulaciones:
@@ -166,10 +176,11 @@ def cargar_modelos(
             for norm in normalizaciones:
                 try:
                     modelos[(form, entidad, norm)] = cargar_modelo(
-                        model_dir, form, entidad, norm
+                        model_dir, form, entidad, norm, distancia
                     )
                 except FileNotFoundError:
-                    print(f"  [aviso] falta el modelo F{form} {entidad} {norm}")
+                    print(f"  [aviso] falta el modelo F{form} {entidad} {norm} "
+                          f"{distancia}")
     return modelos
 
 
@@ -177,18 +188,24 @@ def crear_contextos(
     db_path: Path,
     prog: "Progreso | None" = None,
     entidades: tuple[str, ...] = config.ENTIDADES,
+    distancia: str = distancias.POR_DEFECTO,
 ) -> dict:
     """Un contexto por (entidad, normalizacion); reutilizado por F2 y F5.
 
     Es el arranque mas caro (reconstruye la parte pesada del pipeline: la W de
     la F2 y el mapa RFF de la F5), por eso se cronometra por contexto y por eso
     `entidades` permite no montar el de una entidad que no se va a evaluar.
+
+    `distancia` es la geometria de los modelos que se van a evaluar con estos
+    contextos: las fases reconstruyen la S desde aqui y la comparan con la del
+    artefacto, asi que las dos tienen que medir igual.
     """
     ctxs: dict = {}
     for entidad in entidades:
         for norm in config.NORMALIZACIONES:
-            with _quizas_paso(prog, f"[setup] contexto {entidad}/{norm}"):
-                ctxs[(entidad, norm)] = construccion.crear_contexto(db_path, entidad, norm)
+            with _quizas_paso(prog, f"[setup] contexto {entidad}/{norm}/{distancia}"):
+                ctxs[(entidad, norm)] = construccion.crear_contexto(
+                    db_path, entidad, norm, distancia=distancia)
     return ctxs
 
 
@@ -196,17 +213,59 @@ def crear_contextos(
 # Ejecucion de las fases                                                        #
 # --------------------------------------------------------------------------- #
 
-def _clave(form, entidad, norm):
-    return f"F{form}_{entidad}_{norm}"
+def hiperparametros_declarados(modelo, entidad: str) -> dict[str, object]:
+    """Los hiperparametros con los que se ajusto ESTE artefacto, desde su meta.
+
+    Varias fases no leen la matriz S y ya esta: la reconstruyen para poder
+    perturbarla (la 2 remuestrea partidos y vuelve a ajustar; la 1 y la 4
+    comparan la etapa 1 con la etapa 2). Esa reconstruccion sale de
+    `src.similitud.config`, asi que si el modulo dice una cosa y el artefacto se
+    ajusto con otra, lo que se mide es un GEMELO del modelo, no el modelo.
+
+    No es hipotetico: el default del modulo para la etapa 1 de equipo es
+    `sinkhorn` y los artefactos servidos son `mmd`. Sin esto, evaluar el modelo de
+    equipo servido reconstruia con transporte optimo un modelo ajustado con MMD
+    —numeros de otro modelo, y ademas dos ordenes de magnitud mas caro—.
+
+    El barrido no lo necesita (cada combinacion ya fija sus valores en el
+    `config_temporal` de su celda, y coinciden con los del artefacto), pero
+    aplicarlo tambien alli es inocuo: pone los mismos valores que ya estan.
+
+    Solo se devuelven las claves que el artefacto declara; lo que no diga se
+    queda como este en el modulo.
+    """
+    meta = getattr(modelo, "meta", None) or {}
+    attr_metodo = ("F5_METODO_JUGADOR" if entidad == "jugador"
+                   else "F5_METODO_EQUIPO")
+    posibles = {
+        attr_metodo: meta.get("metodo_distribucional"),
+        "F5_EASE_LAMBDA": meta.get("ease_lambda"),
+        "F5_RFF_DIM": meta.get("rff_dim"),
+        "F5_SINKHORN_REG": meta.get("sinkhorn_reg"),
+    }
+    return {k: v for k, v in posibles.items() if v is not None}
 
 
-def _pasos_totales(n_modelos: int, fases_sel: set[str], bootstrap: int) -> int:
+def _clave(form, entidad, norm, distancia=distancias.POR_DEFECTO):
+    """Etiqueta compacta del modelo en CSV, tablas y figuras.
+
+    La distancia va SIEMPRE, tambien cuando es la euclidea: en disco callarla
+    ahorra renombrar miles de artefactos, pero en un resultado no declarar con
+    que geometria se midio es lo que haria incomparables dos filas de la misma
+    tabla. Es la misma etiqueta que produce `trabajo.Celda.etiqueta`.
+    """
+    return f"F{form}_{entidad}_{norm}_{distancia}"
+
+
+def _pasos_totales(n_modelos: int, fases_sel: set[str], bootstrap: int,
+                   holdout: tuple[str, ...] = ()) -> int:
     """Cuantos pasos cronometrados hara `ejecutar` (para el contador y la ETA)."""
     por_combo = (
         ("0" in fases_sel)
         + ("1" in fases_sel)
         + ("2" in fases_sel and bootstrap > 0)
         + ("5" in fases_sel)
+        + ("7" in fases_sel and bool(holdout))
     )
     return (1 if "3" in fases_sel else 0) + n_modelos * por_combo
 
@@ -214,17 +273,34 @@ def _pasos_totales(n_modelos: int, fases_sel: set[str], bootstrap: int) -> int:
 # Tablas que produce la evaluacion. `f3` es la unica que NO sale de un modelo
 # suelto: compara modelos entre si, asi que la llena `ejecutar` y no
 # `evaluar_modelo`.
-TABLAS = ("f0", "f1", "f1_estratos", "f2", "f3", "f4", "f5", "face")
+TABLAS = ("f0", "f1", "f1_estratos", "f2", "f3", "f4", "f5", "f7", "face")
 
 
 def tablas_vacias() -> dict[str, list]:
     return {k: [] for k in TABLAS}
 
 
+def _estado_warm(ruta: Path | None):
+    """Estado warm de un artefacto, o None si no esta o no se puede leer.
+
+    Sin el, la Fase 7 se ajusta su propio modelo: es un atajo, no un requisito, y
+    un `.warm.npz` que falte no puede tumbar la evaluacion.
+    """
+    if ruta is None or not Path(ruta).is_file():
+        return None
+    try:
+        return EstadoWarm.cargar(Path(ruta))
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def evaluar_modelo(
     modelo, ctx, form: str, entidad: str, norm: str,
     roles: dict, minutos: dict, fases_sel: set[str], bootstrap: int,
     prog: "Progreso | None" = None, sufijo: str = "",
+    db_path: Path | None = None, holdout: tuple[str, ...] = (),
+    ruta_warm: Path | None = None,
+    distancia: str = distancias.POR_DEFECTO,
 ) -> dict[str, list]:
     """Las fases de UN modelo; devuelve sus filas, con las mismas tablas que
     `ejecutar` (todas menos `f3`, que necesita varios modelos a la vez).
@@ -233,12 +309,21 @@ def evaluar_modelo(
     este modelo y de su contexto. Por eso es tambien la unidad que reparte el
     barrido entre procesos (`src.evaluacion.trabajo`), y por eso vive aqui y no
     alli: el barrido y `evaluar` tienen que medir exactamente lo mismo.
+
+    `db_path`, `holdout` y `ruta_warm` son de la Fase 7, la unica que no se puede
+    calcular desde el artefacto y su contexto: mide sobre entidades que no estan
+    en el modelo, asi que le hace falta volver a la BD. `ruta_warm` es el estado
+    del ajuste (`<stem>.warm.npz`): con el —y si el modelo de verdad no vio la
+    liga— la fase reutiliza ESTE artefacto en vez de ajustarse otro, que es la
+    diferencia entre medir la generalizacion del modelo que se esta evaluando o
+    la de un gemelo suyo. Van con valor por defecto para que quien no pida esa
+    fase no tenga que enterarse.
     """
     salida = tablas_vacias()
-    etiqueta = _clave(form, entidad, norm)
+    etiqueta = _clave(form, entidad, norm, distancia)
     suf = f"{etiqueta} {sufijo}".strip()
     base = {"modelo": etiqueta, "formulacion": form,
-            "entidad": entidad, "normalizacion": norm}
+            "entidad": entidad, "normalizacion": norm, "distancia": distancia}
 
     if "0" in fases_sel:
         with _quizas_paso(prog, f"[Fase 0] sanity {suf}"):
@@ -286,14 +371,43 @@ def evaluar_modelo(
                 {**base, **fases.fase5_downstream(modelo, roles, minutos, rep)}
             )
 
+    if "7" in fases_sel and holdout:
+        if db_path is None:
+            raise ValueError(
+                "la Fase 7 reajusta el modelo sin una liga: necesita la BD")
+        with _quizas_paso(prog, f"[Fase 7] generalizacion {suf} "
+                                f"(sin {', '.join(holdout)})"):
+            try:
+                salida["f7"].extend(generalizacion.fase7_generalizacion(
+                    db_path, entidad, norm, form, holdout, roles,
+                    distancia=distancia,
+                    reportar=_quizas_sub(prog, "proyeccion"),
+                    reportar_ajuste=_quizas_sub(prog, "ajuste sin la liga"),
+                    reportar_autosim=_quizas_sub(prog, "auto-similitud"),
+                    modelo=modelo,
+                    estado=_estado_warm(ruta_warm),
+                ))
+            except generalizacion.SinHoldout as e:
+                # Una particion imposible (liga que no aporta a nadie, o que se
+                # lleva todas las entidades) no es un fallo de la evaluacion: es
+                # que esa fase no aplica a este modelo. Se dice y se sigue.
+                print(f"  [aviso] sin generalizacion para {etiqueta}: {e}")
+
     return salida
 
 
 def ejecutar(
     modelos: dict, ctxs: dict, roles: dict, minutos: dict,
     fases_sel: set[str], bootstrap: int, prog: "Progreso | None" = None,
+    db_path: Path | None = None, holdout: tuple[str, ...] = (),
+    distancia: str = distancias.POR_DEFECTO,
 ) -> dict:
-    """Corre las fases seleccionadas y devuelve tablas (listas de dicts)."""
+    """Corre las fases seleccionadas y devuelve tablas (listas de dicts).
+
+    `modelos` y `ctxs` son de UNA distancia (la que se declara aqui): la Fase 3
+    triangula dentro de una misma geometria. Para evaluar varias, `main` recorre
+    una por una y funde las tablas, que ya traen la columna `distancia`.
+    """
     salida = tablas_vacias()
 
     combos = [(f, e, n) for f in config.FORMULACIONES
@@ -306,11 +420,16 @@ def ejecutar(
                 modelos, ctxs, _quizas_sub(prog, "comparacion"))
 
     for i, (form, entidad, norm) in enumerate(combos, start=1):
-        parcial = evaluar_modelo(
-            modelos[(form, entidad, norm)], ctxs[(entidad, norm)],
-            form, entidad, norm, roles, minutos, fases_sel, bootstrap, prog,
-            sufijo=f"(modelo {i}/{len(combos)})",
-        )
+        modelo = modelos[(form, entidad, norm)]
+        # Cada modelo se mide con SUS hiperparametros, no con los defaults del
+        # modulo (ver `hiperparametros_declarados`).
+        with config_temporal(hiperparametros_declarados(modelo, entidad)):
+            parcial = evaluar_modelo(
+                modelo, ctxs[(entidad, norm)],
+                form, entidad, norm, roles, minutos, fases_sel, bootstrap, prog,
+                sufijo=f"(modelo {i}/{len(combos)})",
+                db_path=db_path, holdout=holdout, distancia=distancia,
+            )
         for tabla, filas in parcial.items():
             salida[tabla].extend(filas)
 
@@ -344,6 +463,7 @@ def escribir_csv(salida: dict, out_dir: Path, extra: dict | None = None) -> None
         "fase3_triangulacion": salida["f3"],
         "fase4_denoising": salida["f4"],
         "fase5_downstream": salida["f5"],
+        "fase7_generalizacion": salida["f7"],
     }
     for nombre, filas in tablas.items():
         if filas:
@@ -360,7 +480,7 @@ def escribir_csv(salida: dict, out_dir: Path, extra: dict | None = None) -> None
 # features (con o sin posicion). Los informes abren cada fila con los tres ejes y
 # declaran el espacio de features de los artefactos que se cargaron.
 
-COLUMNAS_ID = ("formulacion", "entidad", "normalizacion")
+COLUMNAS_ID = ("formulacion", "entidad", "normalizacion", "distancia")
 
 LEYENDA_EJES = [
     "- **formulacion** — `F2`: SLIM instancia-instancia sobre las observaciones "
@@ -373,6 +493,16 @@ LEYENDA_EJES = [
     "- **normalizacion** — `por_liga`: z-score dentro de cada "
     "competicion-temporada. `global`: z-score sobre todo el dataset (habilita "
     "comparar entre ligas).",
+    "- **distancia** — geometria en la que se eligen los vecinos y se mide el "
+    "residuo del ajuste (`src/similitud/distancias.py`). `euclidea`: la de "
+    "siempre, y la geometria del grueso de lo acumulado. `coseno`: solo la "
+    "FORMA del perfil, ciega al volumen. `manhattan`: suma de diferencias "
+    "absolutas, con residuo L1 por IRLS y kernel laplaciano en la F5, y la "
+    "que SIRVE la app. `mahalanobis` (euclidea tras blanquear) esta "
+    "DESCARTADA: su blanqueo deshace la ponderacion del bloque pos_*, asi "
+    "que no se sirve ni se barre. Dos filas con distinta distancia son "
+    "modelos distintos, no dos "
+    "medidas del mismo.",
 ]
 
 
@@ -384,7 +514,9 @@ def _cab_id(*extra: str) -> tuple[str, str]:
 
 def _id(r: dict) -> str:
     """Celdas de identificacion (ya con la barra final) de una fila-modelo."""
-    return f"| F{r['formulacion']} | {r['entidad']} | {r['normalizacion']} |"
+    dist = r.get("distancia") or distancias.POR_DEFECTO
+    return (f"| F{r['formulacion']} | {r['entidad']} | {r['normalizacion']} "
+            f"| {dist} |")
 
 
 def resumen_features(modelos: dict) -> list[str]:
@@ -417,6 +549,98 @@ def _fmt(x, dec=3):
     return str(x)
 
 
+ETIQUETA_METRICA_GEN = {
+    "top1": "auto-similitud top-1",
+    "mrr": "auto-similitud MRR",
+    "pureza_top1": "pureza top-1",
+    "knn_accuracy": "k-NN por rol",
+    "rbo_medio": "estabilidad RBO@10",
+    "coverage": "cobertura",
+    "diversity": "diversidad",
+}
+
+
+def _bloque_generalizacion(filas: list[dict]) -> list[str]:
+    """Seccion de la Fase 7: cada metrica, dentro y fuera de muestra.
+
+    Se emparejan las dos filas de cada modelo para poder escribir las tres cifras
+    juntas (dentro, fuera y la resta). Lo que entra en el score compuesto es la
+    columna de FUERA —el nivel, no la caida—, pero la caida es lo que se lee de un
+    vistazo, asi que se calcula aqui.
+    """
+    L = ["## Fase 7 - Generalizacion (liga excluida del ajuste)\n"]
+    holdouts = sorted({r["holdout"] for r in filas})
+    L.append(
+        f"El modelo se REAJUSTA sin las ligas {', '.join(holdouts)} y sus "
+        "entidades se colocan despues en el con `foldin`, que es lo que hace la "
+        "app cuando alguien pregunta por alguien que no esta en el modelo. Se "
+        "miden LAS MISMAS metricas de las fases anteriores, con el mismo numero "
+        "de consultas en los dos ambitos.\n"
+    )
+    L.append(
+        "> La caida mezcla dos cosas: que la liga excluida sea distinta y que su "
+        "respuesta se calcule proyectando en vez de leyendo la S. La segunda esta "
+        "acotada aparte (ver `src/similitud/foldin.py`). La pureza y el k-NN usan "
+        "la posicion como etiqueta y la posicion ES una feature del jugador: son "
+        "circulares en nivel, no en la comparacion dentro/fuera. La estabilidad "
+        "solo se mide fuera: dentro es la Fase 2, que remuestrea reconstruyendo "
+        "la S entera.\n"
+    )
+
+    por_modelo: dict[str, dict[str, dict]] = {}
+    for r in filas:
+        por_modelo.setdefault(r["modelo"], {})[r["ambito"]] = r
+
+    L.append("| modelo | fidelidad | metrica | dentro | fuera | caida |")
+    L.append("|---|---|---|---|---|---|")
+    for nombre, ambitos in sorted(por_modelo.items()):
+        dentro, fuera = ambitos.get("dentro"), ambitos.get("fuera")
+        if fuera is None:
+            continue
+        for metrica, etiqueta in ETIQUETA_METRICA_GEN.items():
+            v_dentro = dentro.get(metrica, float("nan")) if dentro else float("nan")
+            v_fuera = fuera.get(metrica, float("nan"))
+            if not np.isfinite(v_dentro) and not np.isfinite(v_fuera):
+                continue
+            caida = (v_dentro - v_fuera
+                     if np.isfinite(v_dentro) and np.isfinite(v_fuera)
+                     else float("nan"))
+            L.append(
+                f"| {nombre} | {fuera['fidelidad']} | {etiqueta} | "
+                f"{_fmt(v_dentro)} | {_fmt(v_fuera)} | {_fmt(caida)} |"
+            )
+    L.append("")
+    for nombre, ambitos in sorted(por_modelo.items()):
+        fuera = ambitos.get("fuera")
+        if fuera:
+            L.append(
+                f"- **{nombre}**: {fuera['n_holdout']} entidades fuera de muestra "
+                f"contra un modelo de {fuera['n_train']}; "
+                f"{fuera['distintos_top1']} top-1 distintos en "
+                f"{fuera['n_entidades']} consultas (colapso: cuantos menos, peor)."
+            )
+    L.append("")
+
+    peor = max(
+        (abs(a["dentro"]["knn_accuracy"] - a["fuera"]["knn_accuracy"])
+         for a in por_modelo.values()
+         if "dentro" in a and "fuera" in a
+         and np.isfinite(a["dentro"]["knn_accuracy"])
+         and np.isfinite(a["fuera"]["knn_accuracy"])),
+        default=float("nan"),
+    )
+    if np.isfinite(peor):
+        ok = peor <= config.BRECHA_ACEPTABLE
+        L.append(
+            f"**Veredicto:** mayor caida del k-NN por rol = {peor:.1%} -> "
+            f"{'el criterio VIAJA' if ok else 'REVISAR'} frente al umbral "
+            f"orientativo de {config.BRECHA_ACEPTABLE:.0%}. Sin auto-similitud "
+            "(formulaciones cuya proyeccion no es fiel) la comparacion se apoya "
+            "solo en senales circulares: leerla con esa reserva.\n"
+        )
+    return L
+
+
 def escribir_informe(salida: dict, out_dir: Path, meta: dict) -> None:
     """Genera `resumen.md`: tablas + veredicto orientativo por fase."""
     L: list[str] = []
@@ -432,9 +656,9 @@ def escribir_informe(salida: dict, out_dir: Path, meta: dict) -> None:
              "no por una metrica aislada.\n")
 
     L.append("## Que modelo es cada uno\n")
-    L.append("Las tablas abren cada fila con los tres ejes que identifican al "
+    L.append("Las tablas abren cada fila con los cuatro ejes que identifican al "
              "modelo (la etiqueta compacta seria `F<formulacion>_<entidad>_"
-             "<normalizacion>`):\n")
+             "<normalizacion>_<distancia>`):\n")
     L.extend(LEYENDA_EJES)
     if meta.get("features"):
         L.append("\nEspacio de features de los artefactos evaluados (no va en el "
@@ -566,6 +790,10 @@ def escribir_informe(salida: dict, out_dir: Path, meta: dict) -> None:
                  "siempre a los mismos (cabeza). Diversidad muy baja = "
                  "recomendaciones redundantes.\n")
 
+    # Fase 7.
+    if salida["f7"]:
+        L.extend(_bloque_generalizacion(salida["f7"]))
+
     # Face validity.
     if salida["face"]:
         L.append("## Face validity (revision cualitativa)\n")
@@ -637,46 +865,123 @@ def escribir_figuras(salida: dict, out_dir: Path) -> None:
 # CLI                                                                           #
 # --------------------------------------------------------------------------- #
 
+def _holdout_pedido(db_path: Path, texto: str, fases_sel: set[str]) -> tuple[str, ...]:
+    """Ligas excluidas de la Fase 7, resueltas contra las que tiene la BD.
+
+    Pedir la fase sin ligas es un error y no un aviso: la fase no mide NADA sin
+    hold-out, y dejarla pasar en silencio haria creer que se ha comprobado la
+    generalizacion cuando no se ha comprobado nada. Al reves —dar ligas sin pedir
+    la fase— tampoco se calla: es una peticion que no se va a atender.
+    """
+    pedidas = [t.strip() for t in texto.split(",") if t.strip()]
+    if not pedidas:
+        if "7" in fases_sel:
+            disponibles = datos.ligas_por_clave(db_path)
+            raise SystemExit(
+                "La fase 7 (generalizacion) necesita --holdout con la liga que "
+                "se deja fuera del ajuste. En esta BD hay: "
+                + "; ".join(f"{k} ({v})" for k, v in disponibles.items())
+            )
+        return ()
+    if "7" not in fases_sel:
+        print("  [aviso] --holdout solo lo usa la fase 7, que no se ha pedido")
+        return ()
+    resueltas = generalizacion.resolver_holdout(
+        datos.ligas_por_clave(db_path), pedidas)
+    print(f"Hold-out: {', '.join(resueltas)} (fuera del ajuste de la fase 7)")
+    return resueltas
+
+
+def _subconjunto_distancias(pedido: str) -> tuple[str, ...]:
+    """Parsea `--distancias` validando contra el catalogo, en orden estable."""
+    pedidas = [v.strip() for v in pedido.split(",") if v.strip()]
+    desconocidas = [v for v in pedidas if v not in config.DISTANCIAS]
+    if desconocidas:
+        raise SystemExit(f"distancias desconocidas: {desconocidas}. "
+                         f"Disponibles: {', '.join(config.DISTANCIAS)}.")
+    if not pedidas:
+        raise SystemExit("Hay que indicar al menos una distancia: "
+                         f"{', '.join(config.DISTANCIAS)}.")
+    return tuple(d for d in config.DISTANCIAS if d in pedidas)
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description="Evalua los modelos de similitud.")
     p.add_argument("--db", type=Path, default=config.DEFAULT_DB_PATH)
     p.add_argument("--model-dir", type=Path, default=config.DEFAULT_MODEL_DIR)
     p.add_argument("--out", type=Path, default=config.DEFAULT_OUT_DIR)
     p.add_argument("--fases", type=str, default="0,1,2,3,5",
-                   help="Subconjunto de fases a ejecutar (coma-separado).")
+                   help="Subconjunto de fases a ejecutar (coma-separado). La 7 "
+                        "(generalizacion) no entra por defecto: reajusta el "
+                        "modelo y necesita --holdout.")
     p.add_argument("--bootstrap", type=int, default=config.BOOTSTRAP_B,
                    help="Remuestreos bootstrap de la Fase 2 (0 para omitir).")
+    p.add_argument("--holdout", default="",
+                   help="Ligas que se EXCLUYEN del ajuste en la Fase 7, separadas "
+                        "por comas. Se acepta la clave (`1238-108`) o un trozo "
+                        "del nombre (`india`).")
     p.add_argument("--sin-figuras", action="store_true")
+    p.add_argument("--distancias", type=str,
+                   default=",".join(config.DISTANCIA_EVALUADA),
+                   help="Distancias cuyos modelos se evaluan (coma-separado). "
+                        f"Disponibles: {', '.join(config.DISTANCIAS)}. Por "
+                        f"defecto solo {', '.join(config.DISTANCIA_EVALUADA)}, "
+                        "que es la geometria de los artefactos SERVIDOS "
+                        "(`similitud.config.DISTANCIA_SERVIBLE`): este comando "
+                        "mide los modelos vigentes, no una rejilla. El resto "
+                        "solo existe si se ha construido con `build "
+                        "--distancia`. Cada una se evalua por separado —la Fase "
+                        "3 triangula dentro de una misma geometria— y sus filas "
+                        "se funden en los mismos CSV, distinguidas por la "
+                        "columna `distancia`.")
     args = p.parse_args(argv)
 
     fases_sel = {s.strip() for s in args.fases.split(",") if s.strip()}
     args.out.mkdir(parents=True, exist_ok=True)
+    distancias_sel = _subconjunto_distancias(args.distancias)
 
     t0 = time.perf_counter()
     print("Cargando modelos y datos...")
-    modelos = cargar_modelos(args.model_dir)
-    if not modelos:
-        raise SystemExit(f"No hay modelos en {args.model_dir}")
+    por_distancia = {
+        d: cargar_modelos(args.model_dir, distancia=d) for d in distancias_sel
+    }
+    por_distancia = {d: m for d, m in por_distancia.items() if m}
+    if not por_distancia:
+        raise SystemExit(
+            f"No hay modelos en {args.model_dir} para las distancias "
+            f"{list(distancias_sel)}")
+    n_modelos = sum(len(m) for m in por_distancia.values())
     roles = datos.rol_por_jugador(args.db)
     minutos = datos.minutos_por_jugador(args.db)
+    holdout = _holdout_pedido(args.db, args.holdout, fases_sel)
 
-    n_ctx = len(config.ENTIDADES) * len(config.NORMALIZACIONES)
-    total = n_ctx + _pasos_totales(len(modelos), fases_sel, args.bootstrap)
+    n_ctx = len(config.ENTIDADES) * len(config.NORMALIZACIONES) * len(por_distancia)
+    total = n_ctx + _pasos_totales(
+        n_modelos, fases_sel, args.bootstrap, holdout)
     prog = Progreso(total)
-    print(f"{len(modelos)} modelos | fases {sorted(fases_sel)} | "
+    print(f"{n_modelos} modelos ({len(por_distancia)} distancia(s): "
+          f"{', '.join(por_distancia)}) | fases {sorted(fases_sel)} | "
           f"bootstrap B={args.bootstrap} | {total} pasos cronometrados.\n")
 
-    ctxs = crear_contextos(args.db, prog)
-    salida = ejecutar(modelos, ctxs, roles, minutos, fases_sel, args.bootstrap, prog)
+    # Una distancia cada vez: sus contextos son los caros y no se comparten
+    # entre geometrias. Las tablas se funden al final; cada fila declara la suya.
+    salida = tablas_vacias()
+    for distancia, modelos in por_distancia.items():
+        ctxs = crear_contextos(args.db, prog, distancia=distancia)
+        parcial = ejecutar(modelos, ctxs, roles, minutos, fases_sel,
+                           args.bootstrap, prog, db_path=args.db,
+                           holdout=holdout, distancia=distancia)
+        for tabla, filas in parcial.items():
+            salida[tabla].extend(filas)
 
     escribir_csv(salida, args.out)
     if not args.sin_figuras:
         escribir_figuras(salida, args.out)
     escribir_informe(salida, args.out, {
         "fecha": time.strftime("%Y-%m-%d %H:%M"),
-        "n_modelos": len(modelos),
+        "n_modelos": n_modelos,
         "bootstrap": args.bootstrap if "2" in fases_sel else 0,
-        "features": resumen_features(modelos),
+        "features": resumen_features(next(iter(por_distancia.values()))),
     })
     dt = time.perf_counter() - t0
     print(f"\nListo en {dt:.0f}s. Resultados en {args.out}/ (ver resumen.md).")

@@ -218,7 +218,8 @@ class TestEvaluacionCompleta:
 
     def test_evalua_los_cuatro_modelos_de_equipo(self, salida: dict) -> None:
         assert {r["modelo"] for r in salida["f0"]} == {
-            f"F{f}_equipo_{n}" for f in ("2", "5") for n in ecfg.NORMALIZACIONES}
+            f"F{f}_equipo_{n}_euclidea"
+            for f in ("2", "5") for n in ecfg.NORMALIZACIONES}
 
     def test_la_fase_4_solo_aparece_para_la_formulacion_5(self, salida: dict) -> None:
         """EASE solo existe en la F5: una fila F2 ahi seria un bug de etiquetado."""

@@ -3,8 +3,11 @@
     python -m src.evaluacion.barrido [--db RUTA] [--out DIR]
                                      [--formulaciones 2,5] [--entidades jugador,equipo]
                                      [--normalizaciones por_liga,global]
+                                     [--distancias euclidea,mahalanobis,coseno,manhattan]
+                                     [--metodo-f5 mmd,sinkhorn]
                                      [--fases 0,1,5] [--bootstrap B] [--sin-figuras]
-                                     [--trabajos N|auto] [--sin-reutilizar-metricas]
+                                     [--holdout LIGA] [--trabajos N|auto]
+                                     [--sin-reutilizar-metricas]
                                      [--rehacer] [--adoptar-existentes]
 
 A diferencia de `src.evaluacion.evaluar` (que exige que los modelos ya esten
@@ -14,9 +17,27 @@ la rejilla (formulacion 2/5 x jugador/equipo x por_liga/global) en su propia
 carpeta y despues corre el protocolo de evaluacion. Asi se puede lanzar de cero,
 sin `build` previo.
 
+**`--distancias` es el CUARTO eje de la rejilla, no un hiperparametro.** La
+distancia entre observaciones (`src.similitud.distancias`: euclidea, mahalanobis,
+coseno, manhattan) decide donde caen los vecinos de la F2, como se mide el residuo
+de SLIM, que kernel usa el MMD y que coste el Sinkhorn. Se comporta EXACTAMENTE
+como la normalizacion y por eso se acota igual, con una flag y no con una entrada
+de `HIPERPARAMETROS`: cada valor da un artefacto propio, una fila propia en las
+tablas y —esto es lo que la separa de un hiperparametro— una FIGURA propia en las
+superficies 3D, en vez de un eje dentro de la misma figura. Comparar geometrias no
+es afinar un numero dentro de una.
+
+Por defecto entra solo la `euclidea`, a diferencia de las normalizaciones (que
+entran las dos): son cuatro valores, no dos, y uno de ellos —`manhattan` sobre la
+F2 de jugador— no tiene la via rapida del producto de matrices y se va a horas. La
+euclidea es ademas la geometria con la que se construyo y midio todo lo que hay
+acumulado en `outputs/`, asi que un barrido sin la flag sigue significando lo
+mismo que antes.
+
 **Como se reparte el trabajo.** La ejecucion no es un bucle de combinaciones: es un
-PLAN de celdas. Una celda es (combinacion, formulacion, entidad, normalizacion) y
-es la unidad indivisible tanto de construccion (un artefacto) como de evaluacion
+PLAN de celdas. Una celda es (combinacion, formulacion, entidad, normalizacion,
+distancia) y es la unidad indivisible tanto de construccion (un artefacto) como de
+evaluacion
 (las fases de un modelo, `evaluar.evaluar_modelo`). El plan se calcula entero
 antes de empezar, y eso habilita las dos cosas que hacen que el barrido termine:
 
@@ -41,14 +62,43 @@ antes de empezar, y eso habilita las dos cosas que hacen que el barrido termine:
 La Fase 3 (triangulacion) no cabe en una celda —compara las S de varios modelos
 entre si—, asi que es una tarea aparte por combinacion.
 
+**`--holdout` cambia lo que se construye, no solo lo que se mide.** Con el, los
+artefactos del barrido se ajustan SIN esas ligas y la Fase 7 mide sobre ese mismo
+artefacto (no se reajusta otro): el experimento es «entreno con estas ligas y veo
+que hace con la que dejo fuera». Eso tiene tres consecuencias que conviene tener
+presentes: los modelos cubren menos entidades (y son los comparables con los que
+sirve la app, si su BD tampoco tiene esa liga), las metricas no son comparables
+con las de un barrido sin hold-out —otro universo, otro pool— y las ligas
+excluidas entran en la HUELLA del artefacto, de modo que la carpeta acumulativa
+no mezcla unos con otros.
+
 Los hiperparametros que se barren NO se piden por linea de comandos: estan
 escritos en `HIPERPARAMETROS`, aqui abajo. El barrido recorre el PRODUCTO
 CARTESIANO de esa lista — cada combinacion fija todos los ejes a la vez — y
 construye/evalua cada una en `<out>/vNN/`. La linea de comandos no elige valores
 de hiperparametro: solo decide QUE modelos entran en la rejilla
-(`--formulaciones`, `--entidades`, `--normalizaciones`), COMO se evaluan
-(`--fases`, `--bootstrap`, `--sin-figuras`) y que hace la caché (`--rehacer`,
-`--adoptar-existentes`).
+(`--formulaciones`, `--entidades`, `--normalizaciones`, `--metodo-f5`), COMO se
+evaluan (`--fases`, `--bootstrap`, `--sin-figuras`) y que hace la caché
+(`--rehacer`, `--adoptar-existentes`).
+
+**`--metodo-f5` es la excepcion a lo anterior, y por eso es una flag y no una
+entrada de `HIPERPARAMETROS`.** El metodo de la etapa 1 de la F5 (`mmd` o
+`sinkhorn`) no es un numero que se afine: es QUE algoritmo se ejecuta, y hoy se
+elige por ENTIDAD en `similitud.config` (jugador `mmd`, equipo `sinkhorn`) porque
+sus costes no se parecen — el OT del Sinkhorn es cuadratico en observaciones
+(~30 s en los 98 equipos, ~3,6 h en los 2.640 jugadores) y el MMD es lineal
+(~4 s). Ponerlo en la lista lo dejaria encendido en todas las tandas; como flag,
+forzarlo es una decision explicita de esa ejecucion.
+
+Lo que si comparte con los hiperparametros es la mecanica: la flag inyecta
+`F5_METODO_JUGADOR` y `F5_METODO_EQUIPO` como EJES de la rejilla, con lo que el
+metodo entra en la identidad de la combinacion (`registro`) y en la huella del
+artefacto (`huella._METODO_F5`). Dos consecuencias que son el motivo de hacerlo
+asi: un barrido con `--metodo-f5` no pisa los `vNN` del que se lanzo sin ella, y
+`--metodo-f5 mmd,sinkhorn` compara los dos metodos como una columna mas del
+resumen. Con las dos entidades en la rejilla eso son cuatro combinaciones pero
+solo cuatro artefactos (dos por entidad): cada celda depende del eje de su
+entidad y la deduplicacion por huella se encarga del resto.
 
 Como todo el pipeline lee los valores de `src.similitud.config` en tiempo de
 llamada, basta con fijarlos antes de construir/evaluar y restaurarlos despues. El
@@ -86,9 +136,18 @@ from pathlib import Path
 import pandas as pd
 
 from src.similitud import config as scfg
+from src.similitud import warm
 
 from . import config as ecfg
-from . import evaluar, huella, paralelo, puntuacion, registro, trabajo
+from . import (
+    evaluar,
+    generalizacion,
+    huella,
+    paralelo,
+    puntuacion,
+    registro,
+    trabajo,
+)
 from .evaluar import _fmt
 from .trabajo import Celda, config_temporal as _config_temporal
 
@@ -109,14 +168,18 @@ from .trabajo import Celda, config_temporal as _config_temporal
 HIPERPARAMETROS: list[tuple[str, list[object]]] = [
     # Formulacion 2 (SLIM instancia-instancia): penalizacion L1 (dispersion de W)
     # y ridge L2.
-    ("F2_L1", [0.475]),
-    ("F2_BETA", [13.75]),
+    ("F2_L1", [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]),
+    ("F2_BETA", [11.0, 11.25, 11.5, 11.75, 12.0, 12.25, 12.5, 12.75, 13.0]),
     # Formulacion 5 (distribucional + EASE): fuerza del re-ranking EASE, barrida
     # en un rango amplio (de casi-sin-regularizar a dominado por el ridge), y
     # dimension del embedding RFF con que se aproxima el MMD del jugador.
+    # ("F5_EASE_LAMBDA", [0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1]),
+    # ("F5_RFF_DIM", [1152, 1184, 1216, 1248, 1280]),
+
+    # Arreglos de jugador.
     ("F5_EASE_LAMBDA", [0.0]),
-    ("F5_RFF_DIM", [1750, 1775]),
-]
+    ("F5_RFF_DIM", [960, 992, 1024, 1056, 1088]),
+    ]
 
 # El bloque de posicion del jugador (25 columnas `pos_*`) NO se barre: forma
 # parte del modelo base, z-scoreado con el resto y dividido por sqrt(25) para que
@@ -129,19 +192,37 @@ HIPERPARAMETROS: list[tuple[str, list[object]]] = [
 # sin posicion hay que tocar esos dos atributos de `src/similitud/config.py` a mano.
 
 
-def _valores_declarados() -> dict[str, list[object]]:
-    return {attr: valores for attr, valores in HIPERPARAMETROS}
+Ejes = list[tuple[str, list[object]]]
 
 
-def _validar_hiperparametros() -> None:
+def _ejes_declarados(extra: Ejes | None = None) -> Ejes:
+    """`HIPERPARAMETROS` + los ejes que inyecta la linea de comandos.
+
+    El unico eje inyectable hoy es el metodo de la etapa 1 de la F5
+    (`--metodo-f5`, ver `_ejes_metodo_f5`). Se anade DESPUES de los declarados
+    para que el orden de las columnas del resumen sea estable.
+    """
+    return [*HIPERPARAMETROS, *(extra or [])]
+
+
+def _valores_declarados(extra: Ejes | None = None) -> dict[str, list[object]]:
+    return {attr: valores for attr, valores in _ejes_declarados(extra)}
+
+
+def _validar_hiperparametros(extra: Ejes | None = None) -> None:
     """Falla al arrancar si la lista de arriba tiene un typo o un eje vacio.
 
     Antes de gastar horas construyendo modelos: un nombre que no existe en
     `src.similitud.config` no sobrescribe nada y el barrido acabaria comparando
     combinaciones identicas sin decirlo.
+
+    Los ejes inyectados por la linea de comandos pasan por lo mismo, y ademas el
+    control de duplicados los cruza con los declarados: declarar `F5_METODO_*` en
+    `HIPERPARAMETROS` y pasar `--metodo-f5` a la vez son dos fuentes para el mismo
+    atributo, y una ganaria en silencio.
     """
     vistos: set[str] = set()
-    for attr, valores in HIPERPARAMETROS:
+    for attr, valores in _ejes_declarados(extra):
         if not hasattr(scfg, attr):
             raise SystemExit(
                 f"hiperparametro desconocido en src.similitud.config: {attr!r} "
@@ -164,8 +245,28 @@ def _fmt_valores(valores: dict[str, object]) -> str:
 # Producto cartesiano de los hiperparametros                                   #
 # --------------------------------------------------------------------------- #
 
+def _ejes_metodo_f5(metodos: tuple[str, ...]) -> Ejes:
+    """Ejes que inyecta `--metodo-f5`: uno por entidad, con los mismos valores.
+
+    El metodo de la etapa 1 de la F5 no es UN atributo de `similitud.config` sino
+    DOS (`F5_METODO_JUGADOR` y `F5_METODO_EQUIPO`, ver `formulacion5._metodo_por_entidad`),
+    asi que la flag inyecta los dos. No hace falta filtrar por la rejilla pedida:
+    `_ejes_relevantes` ya descarta el de la entidad que no se construye, porque
+    `huella.alcance` los reparte por entidad.
+
+    Que sean dos ejes independientes y no uno solo acoplado es lo que permite
+    comparar los dos metodos en las dos entidades de una tanda: con
+    `--metodo-f5 mmd,sinkhorn` salen cuatro combinaciones, pero solo cuatro
+    modelos distintos (dos por entidad), porque cada celda depende unicamente del
+    eje de SU entidad y la deduplicacion por huella reparte el resto.
+    """
+    valores: list[object] = list(metodos)
+    return [("F5_METODO_JUGADOR", valores), ("F5_METODO_EQUIPO", valores)]
+
+
 def _ejes_relevantes(
-    formulaciones: tuple[str, ...], entidades: tuple[str, ...]
+    formulaciones: tuple[str, ...], entidades: tuple[str, ...],
+    extra: Ejes | None = None,
 ) -> list[str]:
     """Ejes cuyo valor cambia ALGUN modelo de la rejilla seleccionada.
 
@@ -178,11 +279,12 @@ def _ejes_relevantes(
     for form in formulaciones:
         for entidad in entidades:
             alcance |= set(huella.alcance(form, entidad))
-    return [attr for attr, _ in HIPERPARAMETROS if attr in alcance]
+    return [attr for attr, _ in _ejes_declarados(extra) if attr in alcance]
 
 
 def configuraciones(
-    formulaciones: tuple[str, ...], entidades: tuple[str, ...]
+    formulaciones: tuple[str, ...], entidades: tuple[str, ...],
+    extra: Ejes | None = None,
 ) -> list[dict[str, object]]:
     """Producto cartesiano de los ejes utiles: una lista de {eje -> valor}.
 
@@ -190,8 +292,8 @@ def configuraciones(
     CONFIGURACION y no por la posicion en esta lista (que cambia en cuanto se
     edita `HIPERPARAMETROS`).
     """
-    declarados = _valores_declarados()
-    ejes = _ejes_relevantes(formulaciones, entidades)
+    declarados = _valores_declarados(extra)
+    ejes = _ejes_relevantes(formulaciones, entidades, extra)
     return [
         dict(zip(ejes, tupla))
         for tupla in itertools.product(*(declarados[eje] for eje in ejes))
@@ -213,7 +315,8 @@ def combinaciones(
     return {f"v{i:0{ancho}d}": c for i, c in enumerate(combos, start=1)}
 
 
-def _ejes_publicados(extra: list[str] | None = None) -> list[str]:
+def _ejes_publicados(extra: list[str] | None = None,
+                     inyectados: Ejes | None = None) -> list[str]:
     """Ejes que aparecen en la tabla de combinaciones: los declarados + `extra`.
 
     Incluye los que quedaron fuera del producto por no afectar a la rejilla
@@ -225,8 +328,16 @@ def _ejes_publicados(extra: list[str] | None = None) -> list[str]:
     porque forman parte de la IDENTIDAD de las combinaciones ya registradas: si
     dejaran de contar, la misma configuracion recibiria un nombre nuevo. Se
     descartan los que ya no existan en `src.similitud.config`.
+
+    `inyectados` son los ejes que anade la linea de comandos (`--metodo-f5`).
+    Publicarlos es lo que hace que un barrido con la flag no pise al de sin ella:
+    si el metodo no entrase en la identidad, dos modelos distintos compartirian
+    `vNN` en la misma carpeta acumulativa y `barrido_metricas.csv` se sobrescribiria
+    a si mismo. Las combinaciones registradas ANTES de que existiera la flag no
+    declaran el eje, pero `registro.completar_ejes` lo recupera de la huella de sus
+    artefactos —que si lo registra— antes de comparar identidades.
     """
-    ejes = [attr for attr, _ in HIPERPARAMETROS]
+    ejes = [attr for attr, _ in _ejes_declarados(inyectados)]
     for eje in extra or ():
         if eje not in ejes and hasattr(scfg, eje):
             ejes.append(eje)
@@ -251,9 +362,10 @@ def _config_efectiva(valores: dict[str, object], ejes: list[str]) -> dict[str, o
 # Construccion + evaluacion de una combinacion                                 #
 # --------------------------------------------------------------------------- #
 
-def _stem(formulacion: str, entidad: str, normalizacion: str) -> str:
+def _stem(formulacion: str, entidad: str, normalizacion: str,
+          distancia: str = ecfg.DISTANCIAS_POR_DEFECTO[0]) -> str:
     """Nombre del artefacto, igual que lo genera `ModeloSimilitud.guardar`."""
-    return Celda(formulacion, entidad, normalizacion).stem
+    return Celda(formulacion, entidad, normalizacion, distancia).stem
 
 
 def _origen_reutilizable(
@@ -291,12 +403,23 @@ def _ruta_visible(p: Path) -> str:
 
 
 def _copiar_artefacto(origen: Path, destino: Path, stem: str) -> None:
-    """Copia .npz + .json + huella. Copiar (~11-36 MB) cuesta segundos frente a
-    los >10 min que tarda reconstruir un F2, y deja cada combinacion autocontenida.
+    """Copia .npz + .json + huella (+ estado warm, si lo hay).
+
+    Copiar (~11-36 MB) cuesta segundos frente a los >10 min que tarda reconstruir
+    un F2, y deja cada combinacion autocontenida.
+
+    El estado warm va con ellos porque la Fase 7 lo necesita para proyectar sin
+    reajustar (el ancho de kernel de la F5 vive ahi): sin copiarlo, una celda que
+    sale de una copia pagaria un ajuste entero solo por no tener a mano un numero.
+    Es opcional —los artefactos anteriores a `warm` no lo llevan— y por eso no
+    esta en el bucle obligatorio.
     """
     destino.mkdir(parents=True, exist_ok=True)
     for ext in (".npz", ".json", huella.SUFIJO):
         shutil.copy2(origen / f"{stem}{ext}", destino / f"{stem}{ext}")
+    estado = origen / f"{stem}{warm.SUFIJO_ESTADO}"
+    if estado.is_file():
+        shutil.copy2(estado, destino / estado.name)
 
 
 # Nombre de la via en el recuento que se imprime.
@@ -306,7 +429,7 @@ _CONTEO = {"cache": "en_cache", "copia": "copiados",
 
 def _decidir_celda(
     db_path: Path, out_dir: Path, model_dir: Path, celda: Celda,
-    rehacer: bool, adoptar: bool,
+    rehacer: bool, adoptar: bool, holdout: tuple[str, ...] = (),
 ) -> tuple[str, Path | None, dict]:
     """De donde sale el artefacto de la celda: `(via, origen, huella)`.
 
@@ -323,7 +446,8 @@ def _decidir_celda(
     convierte en reutilizable; las demas no tocan el disco.
     """
     h = huella.calcular(celda.formulacion, celda.entidad, celda.normalizacion,
-                        db_path)
+                        db_path, excluir_ligas=holdout,
+                        distancia=celda.distancia)
     if not rehacer:
         if huella.coincide(model_dir, celda.stem, h):
             return "cache", model_dir, h
@@ -375,6 +499,8 @@ def _construir_grid(
     formulaciones: tuple[str, ...] = ecfg.FORMULACIONES,
     entidades: tuple[str, ...] = ecfg.ENTIDADES,
     normalizaciones: tuple[str, ...] = ecfg.NORMALIZACIONES,
+    holdout: tuple[str, ...] = (),
+    distancias_sel: tuple[str, ...] = ecfg.DISTANCIAS_POR_DEFECTO,
 ) -> dict[str, int]:
     """Asegura la rejilla de UNA combinacion en `model_dir`, celda a celda.
 
@@ -394,16 +520,18 @@ def _construir_grid(
     model_dir = Path(model_dir)
     conteo = {"en_cache": 0, "copiados": 0, "adoptados": 0, "construidos": 0}
 
-    for celda in trabajo.celdas(formulaciones, entidades, normalizaciones):
+    for celda in trabajo.celdas(formulaciones, entidades, normalizaciones,
+                                distancias_sel):
         via, origen, h = _decidir_celda(db_path, out_dir, model_dir, celda,
-                                        rehacer, adoptar)
+                                        rehacer, adoptar, holdout)
         _log_via(via, celda, model_dir, origen, rehacer)
         if via == "copia":
             _copiar_artefacto(origen, model_dir, celda.stem)
         elif via == "construye":
             # `valores` vacio: la configuracion de la combinacion ya la fijo el
             # llamador y este camino no cambia de proceso.
-            trabajo.construir_celda(db_path, model_dir, celda, {}, h)
+            trabajo.construir_celda(db_path, model_dir, celda, {}, h,
+                                    excluir_ligas=holdout)
         conteo[_CONTEO[via]] += 1
 
     return conteo
@@ -451,6 +579,8 @@ def planificar(
     normalizaciones: tuple[str, ...] = ecfg.NORMALIZACIONES,
     rehacer: bool = False,
     adoptar: bool = False,
+    holdout: tuple[str, ...] = (),
+    distancias_sel: tuple[str, ...] = ecfg.DISTANCIAS_POR_DEFECTO,
 ) -> list[Paso]:
     """Decide, para TODAS las celdas de todas las combinaciones, de donde salen.
 
@@ -466,9 +596,10 @@ def planificar(
     for nombre, valores in seleccion.items():
         model_dir = Path(out_dir) / nombre / "modelo"
         with _config_temporal(valores):
-            for celda in trabajo.celdas(formulaciones, entidades, normalizaciones):
+            for celda in trabajo.celdas(formulaciones, entidades, normalizaciones,
+                                        distancias_sel):
                 via, origen, h = _decidir_celda(db_path, out_dir, model_dir,
-                                                celda, rehacer, adoptar)
+                                                celda, rehacer, adoptar, holdout)
                 pasos.append(Paso(combinacion=nombre, valores=dict(valores),
                                   celda=celda, model_dir=model_dir, huella=h,
                                   via=via, origen=origen))
@@ -491,6 +622,7 @@ def _repartir_construcciones(pasos: list[Paso]) -> list[Paso]:
 
 def construir_plan(
     pasos: list[Paso], db_path: Path, trabajos: int = 1, rehacer: bool = False,
+    holdout: tuple[str, ...] = (),
 ) -> dict[str, int]:
     """Ajusta los artefactos que faltan (en paralelo) y reparte las copias.
 
@@ -512,7 +644,8 @@ def construir_plan(
             _log_via("construye", paso.celda, paso.model_dir, None, rehacer)
         paralelo.mapear(
             [paralelo.Tarea(p.nombre, trabajo.construir_celda,
-                            (db_path, p.model_dir, p.celda, p.valores, p.huella))
+                            (db_path, p.model_dir, p.celda, p.valores, p.huella,
+                             holdout))
              for p in ajustes],
             trabajos, etiqueta="ajustes",
         )
@@ -535,14 +668,18 @@ def construir_plan(
 def _orden_informe(
     formulaciones: tuple[str, ...], entidades: tuple[str, ...],
     normalizaciones: tuple[str, ...] = ecfg.NORMALIZACIONES,
+    distancias_sel: tuple[str, ...] = ecfg.DISTANCIAS_POR_DEFECTO,
 ) -> list[Celda]:
     """Orden en que las celdas aparecen en los CSV y el informe.
 
     Deliberadamente distinto del de ejecucion (`trabajo.celdas`, que agrupa por
     contexto): este reproduce el de `evaluar.ejecutar`, para que los ficheros de
-    una combinacion salgan igual que si se hubiera evaluado del tiron.
+    una combinacion salgan igual que si se hubiera evaluado del tiron. La
+    distancia va la ultima, que es como se recorre alli (una geometria completa
+    detras de otra).
     """
-    return [Celda(form, entidad, norm)
+    return [Celda(form, entidad, norm, dist)
+            for dist in distancias_sel
             for form in formulaciones
             for entidad in entidades
             for norm in normalizaciones]
@@ -579,6 +716,8 @@ def evaluar_plan(
     formulaciones: tuple[str, ...] = ecfg.FORMULACIONES,
     entidades: tuple[str, ...] = ecfg.ENTIDADES,
     normalizaciones: tuple[str, ...] = ecfg.NORMALIZACIONES,
+    holdout: tuple[str, ...] = (),
+    distancias_sel: tuple[str, ...] = ecfg.DISTANCIAS_POR_DEFECTO,
 ) -> dict[str, dict]:
     """Evalua todas las celdas del plan y devuelve {combinacion -> tabla `salida`}.
 
@@ -597,7 +736,7 @@ def evaluar_plan(
         tareas.append(paralelo.Tarea(
             lider.nombre, trabajo.evaluar_celda,
             (db_path, lider.model_dir, lider.celda, lider.valores, fases_sel,
-             bootstrap, detalle),
+             bootstrap, detalle, holdout),
         ))
     ahorro = len(pasos) - len(tareas)
     print(f"\n[evaluar] {len(pasos)} celdas | fases {sorted(fases_sel)} | "
@@ -615,7 +754,8 @@ def evaluar_plan(
     resultados: dict[str, dict] = {}
     for combinacion in dict.fromkeys(p.combinacion for p in pasos):
         salida = evaluar.tablas_vacias()
-        for celda in _orden_informe(formulaciones, entidades, normalizaciones):
+        for celda in _orden_informe(formulaciones, entidades, normalizaciones,
+                                    distancias_sel):
             parcial = por_celda.get((combinacion, celda))
             if parcial is None:
                 continue
@@ -625,7 +765,8 @@ def evaluar_plan(
 
     if "3" in fases_sel:
         _evaluar_fase3(pasos, db_path, resultados, trabajos, reutilizar,
-                       formulaciones, entidades, normalizaciones, detalle)
+                       formulaciones, entidades, normalizaciones, detalle,
+                       distancias_sel)
     return resultados
 
 
@@ -634,6 +775,7 @@ def _evaluar_fase3(
     trabajos: int, reutilizar: bool,
     formulaciones: tuple[str, ...], entidades: tuple[str, ...],
     normalizaciones: tuple[str, ...], detalle: bool,
+    distancias_sel: tuple[str, ...] = ecfg.DISTANCIAS_POR_DEFECTO,
 ) -> None:
     """Añade la Fase 3 (triangulacion) a cada combinacion, como tarea aparte.
 
@@ -659,7 +801,7 @@ def _evaluar_fase3(
         tareas.append(paralelo.Tarea(
             f"{lider} fase3", trabajo.evaluar_fase3,
             (db_path, model_dir, valores, formulaciones, entidades,
-             normalizaciones, detalle),
+             normalizaciones, detalle, distancias_sel),
         ))
     print(f"\n[evaluar] Fase 3: {len(tareas)} triangulaciones para "
           f"{len(por_combinacion)} combinaciones.")
@@ -697,6 +839,8 @@ def evaluar_combinacion(
     formulaciones: tuple[str, ...] = ecfg.FORMULACIONES,
     entidades: tuple[str, ...] = ecfg.ENTIDADES,
     normalizaciones: tuple[str, ...] = ecfg.NORMALIZACIONES,
+    holdout: tuple[str, ...] = (),
+    distancias_sel: tuple[str, ...] = ecfg.DISTANCIAS_POR_DEFECTO,
 ) -> dict:
     """Construye y evalua UNA combinacion de principio a fin, en este proceso.
 
@@ -715,9 +859,11 @@ def evaluar_combinacion(
     with _config_temporal(valores):
         print("[construir] rejilla de modelos ...")
         conteo = _construir_grid(db_path, model_dir, out_dir, rehacer, adoptar,
-                                 formulaciones, entidades, normalizaciones)
+                                 formulaciones, entidades, normalizaciones,
+                                 holdout=holdout, distancias_sel=distancias_sel)
         print("    " + ", ".join(f"{v} {k}" for k, v in conteo.items() if v))
-        celdas = [c for c in trabajo.celdas(formulaciones, entidades, normalizaciones)
+        celdas = [c for c in trabajo.celdas(formulaciones, entidades,
+                                            normalizaciones, distancias_sel)
                   if huella.artefacto_completo(model_dir, c.stem)]
         if not celdas:
             raise SystemExit(f"No se construyo ningun modelo para {nombre!r}")
@@ -728,7 +874,8 @@ def evaluar_combinacion(
     salida = evaluar_plan(pasos, db_path, fases_sel, bootstrap, trabajos=1,
                           reutilizar=False, formulaciones=formulaciones,
                           entidades=entidades,
-                          normalizaciones=normalizaciones)[nombre]
+                          normalizaciones=normalizaciones,
+                          holdout=holdout, distancias_sel=distancias_sel)[nombre]
     escribir_combinacion(nombre, salida, out_dir, con_figuras)
     return salida
 
@@ -737,12 +884,13 @@ def evaluar_combinacion(
 # Resumen comparativo (limpio: sin umbrales ni referencias de la documentacion) #
 # --------------------------------------------------------------------------- #
 
-# Los modelos se identifican por su TRIPLETA (formulacion, entidad,
-# normalizacion), no por la etiqueta compacta `F2_jugador_global`: en las tablas
-# comparativas esa etiqueta sola no dice de que eje viene cada palabra, y la
-# misma etiqueta designa modelos distintos en combinaciones distintas.
-def _id_modelo(r) -> tuple[str, str, str]:
-    return (r["formulacion"], r["entidad"], r["normalizacion"])
+# Los modelos se identifican por su CUATERNA (formulacion, entidad,
+# normalizacion, distancia), no por la etiqueta compacta `F2_jugador_global`: en
+# las tablas comparativas esa etiqueta sola no dice de que eje viene cada palabra,
+# y la misma etiqueta designa modelos distintos en combinaciones distintas.
+def _id_modelo(r) -> tuple[str, str, str, str]:
+    return (r["formulacion"], r["entidad"], r["normalizacion"],
+            r.get("distancia") or ecfg.DISTANCIAS_POR_DEFECTO[0])
 
 
 def _extraer(tabla: str, campo: str, filtro=None):
@@ -758,6 +906,13 @@ def _solo_global(r) -> bool:
     return r["direccion"] == "global"
 
 
+def _fuera_de_muestra(r) -> bool:
+    """La Fase 7 reporta dos ambitos; la comparativa usa el de fuera."""
+    return r["ambito"] == "fuera"
+
+
+
+
 # Que metrica sale de que tabla de `salida`, con el nombre que llevara en la tabla
 # larga (`barrido_metricas.csv`) y en las comparativas.
 ESPECS: list[tuple[str, str, object]] = [
@@ -769,6 +924,13 @@ ESPECS: list[tuple[str, str, object]] = [
     ("5", "knn_accuracy", _extraer("f5", "knn_accuracy")),
     ("5", "coverage", _extraer("f5", "coverage")),
     ("5", "diversity", _extraer("f5", "diversity")),
+    # Fase 7: la MISMA metrica de arriba, medida sobre entidades que el ajuste no
+    # vio. Es su valor absoluto fuera de muestra (`gen_<metrica>`), no una brecha:
+    # un modelo malo dentro y fuera tendria brecha cero sin generalizar nada. Que
+    # metricas tienen gemela lo decide `generalizacion.METRICAS`.
+    *[("7", generalizacion.nombre_metrica(m),
+       _extraer("f7", m, _fuera_de_muestra))
+      for m in generalizacion.METRICAS],
 ]
 
 # Secciones del resumen: (titulo, [(titulo de la tabla, metrica)]). La orientacion
@@ -791,6 +953,20 @@ SECCIONES: list[tuple[str, list[tuple[str, str]]]] = [
         ("Cobertura", "coverage"),
         ("Diversidad intra-lista", "diversity"),
     ]),
+    # Las mismas metricas de arriba, sobre la liga excluida del ajuste. Se listan
+    # en el orden de `METRICAS` para que se lean en paralelo a sus gemelas.
+    ("Generalizacion: las mismas metricas FUERA de muestra", [
+        (f"{titulo} (fuera de muestra)", generalizacion.nombre_metrica(m))
+        for m, titulo in (
+            ("top1", "Auto-similitud top-1"),
+            ("mrr", "Auto-similitud MRR"),
+            ("pureza_top1", "Pureza top-1"),
+            ("knn_accuracy", "Clasificacion posicional k-NN (accuracy)"),
+            ("rbo_medio", "Estabilidad RBO@10 ante remuestreo"),
+            ("coverage", "Cobertura"),
+            ("diversity", "Diversidad intra-lista"),
+        )
+    ]),
 ]
 
 
@@ -799,27 +975,34 @@ def _es_finito(x) -> bool:
 
 
 # Columnas que identifican el modelo al principio de cada tabla comparativa.
-_COLUMNAS_ID = ("formulacion", "entidad", "normalizacion")
+_COLUMNAS_ID = ("formulacion", "entidad", "normalizacion", "distancia")
 
 
-def _celdas_id(clave: tuple[str, str, str]) -> list[str]:
-    form, entidad, norm = clave
-    return [f"F{form}", entidad, norm]
+def _celdas_id(clave: tuple[str, str, str, str]) -> list[str]:
+    form, entidad, norm, dist = clave
+    return [f"F{form}", entidad, norm, dist]
 
 
-def _orden_modelo(clave: tuple[str, str, str]) -> tuple[str, str, str]:
-    """Agrupa por entidad (jugador y equipo no son comparables entre si)."""
-    form, entidad, norm = clave
-    return (entidad, form, norm)
+def _orden_modelo(clave: tuple[str, str, str, str]) -> tuple[str, str, str, str]:
+    """Agrupa por entidad (jugador y equipo no son comparables entre si).
+
+    Dentro de la entidad, la distancia va antes que la formulacion: las filas de
+    una misma geometria salen juntas, que es como se leen (comparar F2 con F5
+    tiene sentido dentro de una distancia; entre distancias lo que se compara es
+    la geometria).
+    """
+    form, entidad, norm, dist = clave
+    return (entidad, dist, form, norm)
 
 
 def _valores_de(df: pd.DataFrame, metrica: str) -> dict:
-    """{(combinacion, tripleta) -> valor finito} de una metrica de la tabla larga."""
+    """{(combinacion, cuaterna) -> valor finito} de una metrica de la tabla larga."""
     sub = df[df["metrica"] == metrica]
-    valores: dict[tuple[str, tuple[str, str, str]], float] = {}
+    valores: dict[tuple[str, tuple[str, str, str, str]], float] = {}
     for r in sub.itertuples(index=False):
         if _es_finito(r.valor):
-            clave = (r.combinacion, (r.formulacion, r.entidad, r.normalizacion))
+            clave = (r.combinacion,
+                     (r.formulacion, r.entidad, r.normalizacion, r.distancia))
             valores[clave] = float(r.valor)
     return valores
 
@@ -873,7 +1056,11 @@ def _tabla_comparativa(
     # lo mismo que las demas.
     por_col: dict[str, list[float]] = {c: [] for c in cols}
     for (c, _m), x in valores.items():
-        por_col[c].append(x)
+        # Solo las columnas publicadas: el CSV acumulado puede traer combinaciones
+        # que el registro de la carpeta ya no conoce (un `combinaciones.json`
+        # perdido), y esas no tienen columna sobre la que promediar.
+        if c in por_col:
+            por_col[c].append(x)
     completas = {c: xs for c, xs in por_col.items() if len(xs) == len(modelos)}
     medias = {c: sum(xs) / len(xs) for c, xs in completas.items()}
     if len(set(medias.values())) > 1:
@@ -891,17 +1078,23 @@ def _tabla_comparativa(
 
 def _tabla_larga_csv(resultados: dict) -> pd.DataFrame:
     """Formato largo para analisis externo, con el modelo ya descompuesto en sus
-    tres ejes (ademas de la etiqueta compacta, para poder filtrar por cualquiera).
+    cuatro ejes (ademas de la etiqueta compacta, para poder filtrar por cualquiera).
+
+    La etiqueta lleva la distancia SIEMPRE, tambien `euclidea`. Es lo que hace que
+    `figuras3d` dibuje una figura por geometria en vez de mezclarlas, y lo que
+    permite que la carpeta acumulativa reciba modelos de varias distancias sin que
+    `registro.acumular` pise unas filas con otras (`CLAVE_METRICA` incluye
+    `modelo`).
     """
     filas = []
     for combinacion, s in resultados.items():
         for fase, metrica, extractor in ESPECS:
             for clave, valor in extractor(s).items():
-                form, entidad, norm = clave
+                form, entidad, norm, dist = clave
                 filas.append({"combinacion": combinacion,
-                              "modelo": f"F{form}_{entidad}_{norm}",
+                              "modelo": f"F{form}_{entidad}_{norm}_{dist}",
                               "formulacion": form, "entidad": entidad,
-                              "normalizacion": norm,
+                              "normalizacion": norm, "distancia": dist,
                               "fase": fase, "metrica": metrica, "valor": valor})
     return pd.DataFrame(filas)
 
@@ -1006,6 +1199,11 @@ def escribir_resumen_barrido(
     Trabaja sobre la tabla larga ACUMULADA de la carpeta, no sobre los resultados
     en memoria de esta ejecucion: es lo que permite que el resumen incluya las
     combinaciones que se evaluaron en ejecuciones anteriores.
+
+    Con `meta["regenerado"]` la cabecera dice que la pasada no evaluo nada: el
+    resumen se reescribe desde el CSV ya guardado (lo hace
+    `src.evaluacion.migrar_distancia --regenerar-resumen`), y anunciar unas fases
+    y un bootstrap que no se han corrido seria falso.
     """
     configs = registro.hiperparametros(reg)
     ejes = meta["ejes"]
@@ -1013,10 +1211,17 @@ def escribir_resumen_barrido(
 
     L: list[str] = []
     L.append("# Barrido de hiperparametros — comparativa entre combinaciones\n")
-    L.append(f"Generado el {meta['fecha']}. La carpeta acumula **{len(configs)} "
-             f"combinaciones**; esta ejecucion evaluo {len(evaluadas)} de ellas "
-             f"(fases {meta['fases']}, bootstrap B={meta['bootstrap']}) y las "
-             "demas conservan las metricas de la ejecucion en que se evaluaron.\n")
+    if meta.get("regenerado"):
+        L.append(f"Regenerado el {meta['fecha']} desde `barrido_metricas.csv`, sin "
+                 "construir ni evaluar nada: las tablas se reescriben con las "
+                 f"metricas ya acumuladas en la carpeta (**{len(configs)} "
+                 "combinaciones**), cada una de la ejecucion en que se midio.\n")
+    else:
+        L.append(f"Generado el {meta['fecha']}. La carpeta acumula **{len(configs)} "
+                 f"combinaciones**; esta ejecucion evaluo {len(evaluadas)} de ellas "
+                 f"(fases {meta['fases']}, bootstrap B={meta['bootstrap']}) y las "
+                 "demas conservan las metricas de la ejecucion en que se "
+                 "evaluaron.\n")
     if meta.get("rejilla"):
         L.append(f"Rejilla construida y evaluada en esta ejecucion: "
                  f"{meta['rejilla']}.\n")
@@ -1070,6 +1275,91 @@ def _subconjunto(pedido: str, validos: tuple[str, ...], que: str) -> tuple[str, 
     return tuple(v for v in validos if v in pedidos)
 
 
+def _metodos_f5(pedido: str) -> tuple[str, ...]:
+    """Valores de `--metodo-f5`. Vacio = el default POR ENTIDAD del repo.
+
+    La tupla vacia no es "ningun metodo": es "no toques la eleccion por entidad de
+    `similitud.config`" (jugador `mmd`, equipo `sinkhorn`), que es el
+    comportamiento de siempre y no anade ningun eje a la rejilla.
+    """
+    if not pedido.strip():
+        return ()
+    return _subconjunto(pedido, ecfg.METODOS_F5, "metodos de la F5")
+
+
+def _avisos_distancias(
+    distancias_sel: tuple[str, ...], formulaciones: tuple[str, ...],
+    entidades: tuple[str, ...],
+) -> list[str]:
+    """Avisos de `--distancias`: lo que cuesta y lo que deja de valer.
+
+    Ninguno aborta —comparar geometrias es el sentido de la flag—, pero las tres
+    situaciones sorprenden si no se dicen antes de empezar horas de trabajo.
+    """
+    avisos: list[str] = []
+    otras = [d for d in distancias_sel if d != ecfg.DISTANCIAS_POR_DEFECTO[0]]
+    if not otras:
+        return avisos
+    if "manhattan" in distancias_sel and "2" in formulaciones and "jugador" in entidades:
+        avisos.append(
+            "--distancias manhattan sobre la F2 de jugador es el caso caro: la L1 "
+            "no tiene la identidad del producto escalar, asi que el kNN de "
+            "candidatos pasa de un GEMM a O(M^2 d) fila a fila sobre ~50.000 "
+            "observaciones (horas por artefacto). En la F5 no aplica: el ancho del "
+            "kernel se estima sobre una submuestra y el RFF es lineal."
+        )
+    if "manhattan" in distancias_sel and "2" in formulaciones:
+        avisos.append(
+            "con manhattan el residuo de SLIM se resuelve por IRLS "
+            "(`slim.elasticnet_residuo_l1`), no en forma cerrada: F2_BETA y F2_L1 "
+            "quedan en otra escala efectiva y los valores afinados para la "
+            "euclidea no son trasladables — hay que barrerlos de nuevo."
+        )
+    if "mahalanobis" in distancias_sel and "jugador" in entidades:
+        avisos.append(
+            "mahalanobis blanquea el espacio, asi que deshace la ponderacion del "
+            "bloque de posicion (POSITION_SCALING='zscore_sqrt', las 25 columnas "
+            "pos_* divididas por sqrt(25) para pesar como una sola feature): tras "
+            "blanquear vuelven a pesar lo que diga la covarianza."
+        )
+    return avisos
+
+
+def _avisos_metodo_f5(
+    metodos: tuple[str, ...], formulaciones: tuple[str, ...],
+    entidades: tuple[str, ...], fases: set[str],
+) -> list[str]:
+    """Avisos de `--metodo-f5`: cuando no hace nada y cuando cuesta caro.
+
+    Ninguno aborta. Forzar el metodo es un experimento legitimo en las dos
+    direcciones —y medir cuanto cuesta es parte de lo que se quiere ver—, pero las
+    tres situaciones sorprenden si no se dicen antes de empezar.
+    """
+    if not metodos:
+        return []
+    avisos: list[str] = []
+    if "5" not in formulaciones:
+        avisos.append(
+            "--metodo-f5 no tiene efecto con --formulaciones sin la 5: el metodo "
+            "distribucional solo existe en la etapa 1 de la F5."
+        )
+        return avisos
+    if "sinkhorn" in metodos and "jugador" in entidades:
+        avisos.append(
+            "--metodo-f5 sinkhorn sobre jugador es el caso caro: el coste OT es "
+            "cuadratico en observaciones (P(P-1)/2 pares de nubes), unas 3,6 h por "
+            "artefacto con la BD base frente a los ~4 s del mmd. Con equipo son "
+            "~30 s."
+        )
+    if "sinkhorn" in metodos and "7" in fases:
+        avisos.append(
+            "la fase 7 no aplica a los modelos F5 con sinkhorn: no se saben "
+            "proyectar fuera de muestra (`foldin.METODOS_PROYECTABLES`), asi que "
+            "se saltaran con un motivo y se quedaran sin metricas `gen_*`."
+        )
+    return avisos
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(
         description="Construye y evalua un modelo por cada combinacion de los "
@@ -1092,6 +1382,27 @@ def main(argv: list[str] | None = None) -> None:
                         "permite compararlas; acotarla a una divide por dos el "
                         "coste cuando la comparacion no es el objetivo de esa "
                         "tanda.")
+    p.add_argument("--distancias", type=str,
+                   default=",".join(ecfg.DISTANCIAS_POR_DEFECTO),
+                   help="Distancias entre observaciones de la rejilla "
+                        f"(coma-separado). Disponibles: {', '.join(ecfg.DISTANCIAS)}. "
+                        "Es el CUARTO eje de la rejilla y se comporta como la "
+                        "normalizacion: cada valor da un artefacto propio, una fila "
+                        "propia en las tablas y una FIGURA propia en las superficies "
+                        "3D (no un eje dentro de la misma figura). Por defecto solo "
+                        "la euclidea, que es la geometria de todo lo acumulado en "
+                        "outputs/: son cuatro valores y uno de ellos (manhattan sobre "
+                        "la F2 de jugador) se va a horas.")
+    p.add_argument("--metodo-f5", type=str, default="",
+                   help="Metodo de la etapa 1 de la F5 (coma-separado). "
+                        f"Disponibles: {', '.join(ecfg.METODOS_F5)}. Por defecto "
+                        "se respeta la eleccion POR ENTIDAD de "
+                        "src/similitud/config.py (jugador mmd, equipo sinkhorn). "
+                        "Indicarlo lo fuerza en las dos entidades, y con dos "
+                        "valores ('mmd,sinkhorn') el metodo pasa a ser un EJE mas "
+                        "de la rejilla: entra en la identidad de la combinacion y "
+                        "en la huella del artefacto, asi que no pisa lo ya "
+                        "acumulado en la carpeta.")
     p.add_argument("--fases", type=str, default="0,1,5",
                    help="Fases a ejecutar por combinacion (coma-separado). El "
                         "barrido multiplica el coste, por eso omite por defecto "
@@ -1099,6 +1410,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--bootstrap", type=int, default=0,
                    help="Remuestreos de la Fase 2 (0 la omite; solo aplica si se "
                         "incluye la fase 2).")
+    p.add_argument("--holdout", default="",
+                   help="Ligas que quedan FUERA DEL AJUSTE (por clave `1238-108` "
+                        "o por un trozo del nombre, `india`). Los modelos del "
+                        "barrido se construyen sin ellas y la fase 7 las usa para "
+                        "medir la generalizacion sobre ese mismo artefacto. Sin "
+                        "esto no se puede correr la fase 7 y el score se queda sin "
+                        "sus metricas de generalizacion. Solo tiene efecto si se "
+                        "pide la fase 7: excluir una liga sin medir nada con ella "
+                        "seria tirar datos.")
     p.add_argument("--sin-figuras", action="store_true")
     p.add_argument("--trabajos", type=str, default="1",
                    help=f"Procesos que construyen y evaluan a la vez ('{paralelo.AUTO}' "
@@ -1125,23 +1445,37 @@ def main(argv: list[str] | None = None) -> None:
                         "posteriori. Los modelos con posicion nunca se adoptan.")
     args = p.parse_args(argv)
 
-    _validar_hiperparametros()
+    # El metodo de la F5 se pide por la linea de comandos, pero se comporta como
+    # un hiperparametro mas: se inyecta como eje y desde aqui abajo viaja con los
+    # declarados en HIPERPARAMETROS.
+    metodos_f5 = _metodos_f5(args.metodo_f5)
+    ejes_metodo = _ejes_metodo_f5(metodos_f5) if metodos_f5 else []
+
+    _validar_hiperparametros(ejes_metodo)
     trabajos = paralelo.resolver_trabajos(args.trabajos)
     formulaciones = _subconjunto(args.formulaciones, ecfg.FORMULACIONES, "formulaciones")
     entidades = _subconjunto(args.entidades, ecfg.ENTIDADES, "entidades")
     normalizaciones = _subconjunto(args.normalizaciones, ecfg.NORMALIZACIONES,
                                    "normalizaciones")
+    distancias_sel = _subconjunto(args.distancias, ecfg.DISTANCIAS, "distancias")
     fases_sel = {s.strip() for s in args.fases.split(",") if s.strip()}
+    for aviso in _avisos_metodo_f5(metodos_f5, formulaciones, entidades, fases_sel):
+        print(f"  [aviso] {aviso}")
+    for aviso in _avisos_distancias(distancias_sel, formulaciones, entidades):
+        print(f"  [aviso] {aviso}")
 
     db_path = args.db
     out_dir = args.out
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Mismo criterio que en `evaluar`: la fase 7 sin ligas excluidas no mide nada,
+    # asi que se para en vez de dejar el score sin su termino en silencio.
+    holdout = evaluar._holdout_pedido(db_path, args.holdout, fases_sel)
 
     # La carpeta es acumulativa: su registro decide como se llama cada
     # configuracion, para que los `vNN` de esta ejecucion sigan designando lo mismo
     # que los de las anteriores (ver `registro.py`).
     reg = registro.cargar(out_dir)
-    ejes = _ejes_publicados(registro.ejes(reg))
+    ejes = _ejes_publicados(registro.ejes(reg), ejes_metodo)
     avisos = registro.completar_ejes(
         out_dir, reg, ejes, {eje: getattr(scfg, eje) for eje in ejes}
     )
@@ -1150,7 +1484,7 @@ def main(argv: list[str] | None = None) -> None:
 
     conocidas = set(reg["combinaciones"])
     efectivas = [_config_efectiva(v, ejes)
-                 for v in configuraciones(formulaciones, entidades)]
+                 for v in configuraciones(formulaciones, entidades, ejes_metodo)]
     seleccion = registro.nombrar(reg, efectivas, ejes)
     nuevas = [n for n in seleccion if n not in conocidas]
 
@@ -1167,16 +1501,19 @@ def main(argv: list[str] | None = None) -> None:
     # sola vez lo que varias combinaciones comparten, y repartir el resto.
     print("\nPlanificando la ejecucion (huella de cada celda)...")
     pasos = planificar(seleccion, db_path, out_dir, formulaciones, entidades,
-                       normalizaciones, args.rehacer, args.adoptar_existentes)
+                       normalizaciones, args.rehacer, args.adoptar_existentes,
+                       holdout=holdout, distancias_sel=distancias_sel)
 
-    conteo = construir_plan(pasos, db_path, trabajos, rehacer=args.rehacer)
+    conteo = construir_plan(pasos, db_path, trabajos, rehacer=args.rehacer,
+                            holdout=holdout)
     print("[construir] " + ", ".join(f"{v} {k}" for k, v in conteo.items() if v))
 
     resultados = evaluar_plan(
         pasos, db_path, fases_sel, args.bootstrap, trabajos,
         reutilizar=not args.sin_reutilizar_metricas,
         formulaciones=formulaciones, entidades=entidades,
-        normalizaciones=normalizaciones,
+        normalizaciones=normalizaciones, holdout=holdout,
+        distancias_sel=distancias_sel,
     )
     for nombre, salida in resultados.items():
         escribir_combinacion(nombre, salida, out_dir,
@@ -1202,7 +1539,8 @@ def main(argv: list[str] | None = None) -> None:
         "evaluadas": list(seleccion),
         "rejilla": f"formulaciones {list(formulaciones)} x entidades "
                    f"{list(entidades)} x normalizaciones "
-                   f"{list(normalizaciones)}",
+                   f"{list(normalizaciones)} x distancias "
+                   f"{list(distancias_sel)}",
     })
     dt = time.perf_counter() - t0
     n_combis = len(set(acumuladas["combinacion"])) if not acumuladas.empty else 0

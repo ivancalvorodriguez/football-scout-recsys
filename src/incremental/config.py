@@ -13,13 +13,19 @@ from pathlib import Path
 from src.similitud.config import (
     DEFAULT_DB_PATH,
     DEFAULT_MODEL_DIR,
+    DISTANCIA_SERVIBLE,
+    HIPERPARAMETROS_SERVIBLES,
     MODELOS_SERVIBLES,
+    hiperparametros_servibles,
 )
 
 __all__ = [
     "DEFAULT_DB_PATH",
     "DEFAULT_MODEL_DIR",
+    "DISTANCIA_SERVIBLE",
+    "HIPERPARAMETROS_SERVIBLES",
     "MODELOS_SERVIBLES",
+    "hiperparametros_servibles",
     "DIR_COPIAS",
     "NOMBRE_INFORME",
     "FICHEROS_PAQUETE",

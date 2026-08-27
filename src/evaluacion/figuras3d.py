@@ -36,20 +36,31 @@ Tres decisiones de lectura, importantes para no malinterpretar las figuras:
   hayan medido. Los puntos realmente evaluados van marcados en negro y son los
   unicos numeros que salen en `rejilla_3d.csv`. Con `--densidad 0` se dibuja la
   rejilla cruda, sin interpolar.
-- **Con mas de dos ejes barridos** se dibuja una figura por PAREJA de ejes, y las
-  celdas se reducen sobre los ejes restantes (`--reduccion`, por defecto el mejor
-  valor segun la orientacion de la metrica). Es una PROYECCION, no un corte: la
-  celda (x, y) enseña lo mejor alcanzable ahi, no el valor de una combinacion
-  concreta. Se declara en el pie de cada figura.
+- **Cada modelo se dibuja sobre SUS ejes**, no sobre todos los de la carpeta. Los
+  ejes de una carpeta son la union de lo que movio cada tanda, pero `F2_L1` no
+  toca un modelo F5 ni `F5_EASE_LAMBDA` uno F2: el reparto sale del alcance por
+  celda de `huella` (`ejes_del_modelo`), el mismo con el que el barrido decide si
+  dos celdas son el mismo artefacto. Dibujar un modelo sobre los ejes de la otra
+  formulacion daba una superficie degenerada —todos sus puntos en una casilla, o
+  un plano perfectamente horizontal si la carpeta tenia el producto cartesiano
+  completo—, que es justo lo contrario de lo que la figura tiene que enseñar. El
+  pie declara que ejes de la carpeta no afectan al modelo dibujado.
+- **Con mas de dos ejes barridos** (de los suyos) se dibuja una figura por PAREJA
+  de ejes, y las celdas se reducen sobre los ejes restantes (`--reduccion`, por
+  defecto el mejor valor segun la orientacion de la metrica). Es una PROYECCION, no
+  un corte: la celda (x, y) enseña lo mejor alcanzable ahi, no el valor de una
+  combinacion concreta. Se declara en el pie de cada figura.
 
 Ademas de las metricas del barrido se dibuja el **score compuesto** de
 `src.evaluacion.puntuacion` (una metrica mas, `score_compuesto`): la media ponderada
 de todas las metricas llevadas a z-score dentro de la entidad. Con el se genera una
 figura extra por entidad, `comparativa_<entidad>__score_compuesto__*.png`, que
-superpone la superficie de CADA modelo en los mismos ejes para ver **cual gana y en
-que zona de hiperparametros**. Es la unica figura que superpone modelos, porque el
-score es lo unico comparable entre ellos; lee las reservas de `puntuacion` antes de
-citarlo (es una heuristica de lectura, no un criterio validado).
+superpone la superficie de cada modelo que COMPARTA esos ejes para ver **cual gana y
+en que zona de hiperparametros** — en la practica, las dos normalizaciones de una
+misma formulacion; dos formulaciones distintas solo comparten ejes si lo barrido es
+un eje comun a las dos. Es la unica figura que superpone modelos, porque el score es
+lo unico comparable entre ellos; lee las reservas de `puntuacion` antes de citarlo
+(es una heuristica de lectura, no un criterio validado).
 
 Salida en `<barrido>/figuras3d/`:
 
@@ -78,7 +89,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import barrido, figuras3d_html, malla, puntuacion, registro
+from . import barrido, figuras3d_html, huella, malla, puntuacion, registro
 from . import config as ecfg
 
 # Orientacion de cada metrica (mayor/menor es mejor): vive en `puntuacion` porque
@@ -106,10 +117,10 @@ def leer_valores(barrido_dir: Path) -> pd.DataFrame:
             "lanza antes `python -m src.evaluacion.barrido` (o apunta --barrido a "
             "la carpeta que lo contiene)."
         )
-    df = pd.read_csv(ruta)
-    df["formulacion"] = df["formulacion"].astype(str)
-    df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
-    return df
+    # `_tipos` homogeneiza los tipos y, si la carpeta es anterior a que la
+    # distancia fuera un eje, rellena la columna con `euclidea` — que es la
+    # geometria con la que se midio todo lo acumulado hasta entonces.
+    return registro._tipos(pd.read_csv(ruta))
 
 
 def _combinaciones_recomputadas(df: pd.DataFrame) -> dict[str, dict[str, object]]:
@@ -182,6 +193,43 @@ def _fijos(combos: dict[str, dict[str, object]], variables: set[str]) -> dict[st
         return {}
     primera = next(iter(combos.values()))
     return {eje: v for eje, v in primera.items() if eje not in variables}
+
+
+def _ejes_conocidos() -> set[str]:
+    """Todos los atributos que `huella` sabe repartir entre celdas."""
+    return {eje
+            for form in ecfg.FORMULACIONES
+            for ent in ecfg.ENTIDADES
+            for eje in huella.alcance(form, ent)}
+
+
+def ejes_del_modelo(
+    variables: dict[str, list[object]], formulacion: str, entidad: str
+) -> list[str]:
+    """De los ejes barridos, los que AFECTAN a ese modelo. Conserva su orden.
+
+    Los ejes de una carpeta son la union de los que movio cada tanda, pero ningun
+    modelo depende de todos: `F2_L1` no toca un modelo F5 y `F5_EASE_LAMBDA` no
+    toca uno F2. La fuente de verdad es el alcance por celda de `huella`, el mismo
+    con el que el barrido decide si dos celdas son el mismo artefacto — asi que
+    "este eje sale en la figura" y "este eje reconstruye el modelo" no pueden
+    discrepar.
+
+    Sin este filtro, cada modelo se dibujaba tambien sobre los ejes de la OTRA
+    formulacion, y ahi todos sus puntos caen en la misma casilla (los ejes ajenos
+    valen su default en todas sus combinaciones): la superficie salia como un
+    unico punto, o como un plano perfectamente horizontal si la carpeta tenia el
+    producto cartesiano completo. En ninguno de los dos casos habia nada que leer.
+
+    Solo se poda lo que se SABE de otra celda. Un eje que no aparece en ningun
+    alcance conocido —una carpeta de una version anterior del codigo, un
+    hiperparametro que ya no existe en `similitud.config`— se conserva para todos
+    los modelos: no clasificarlo no es lo mismo que saber que no aplica, y
+    descartarlo en silencio perderia la unica figura que ese barrido produjo.
+    """
+    alcance = set(huella.alcance(formulacion, entidad))
+    ajenos = _ejes_conocidos() - alcance
+    return [eje for eje in variables if eje not in ajenos]
 
 
 # --------------------------------------------------------------------------- #
@@ -405,8 +453,17 @@ PIE_SCORE = (
 )
 
 
-def _etiqueta_modelo(form: str, entidad: str, norm: str) -> str:
-    return f"F{form}_{entidad}_{norm}"
+def _etiqueta_modelo(form: str, entidad: str, norm: str, dist: str) -> str:
+    """Identidad del modelo en las figuras: los CUATRO ejes.
+
+    La distancia entra aqui —y no en los ejes X/Y de la superficie— porque no es
+    un hiperparametro que se afine: es que modelo se esta dibujando. Dos
+    geometrias distintas dan dos superficies distintas, cada una sobre sus
+    propios hiperparametros, exactamente igual que las dos normalizaciones. Poner
+    la distancia como eje daria una «superficie» sobre un eje categorico de
+    cuatro casillas, que no es una superficie sino cuatro puntos.
+    """
+    return f"F{form}_{entidad}_{norm}_{dist}"
 
 
 def _z_json(Z: np.ndarray) -> list[list[float | None]]:
@@ -452,7 +509,8 @@ def _geometria_json(ex: malla.Eje, ey: malla.Eje) -> dict:
 
 def _pie_de_figura(
     ex: malla.Eje, ey: malla.Eje,
-    resto: list[str], reduccion: str, mejor: str, fijos: dict[str, object]
+    resto: list[str], reduccion: str, mejor: str, fijos: dict[str, object],
+    ajenos: list[str] | None = None,
 ) -> str:
     partes = [f"Ejes a escala: {ex.descripcion()}; {ey.descripcion()}."]
     if ex.uf.size > ex.u.size or ey.uf.size > ey.u.size:
@@ -466,6 +524,12 @@ def _pie_de_figura(
                       "(no es un corte a valor fijo).")
     if fijos:
         partes.append("Fijos: " + ", ".join(f"{k}={v}" for k, v in fijos.items()) + ".")
+    if ajenos:
+        # No es lo mismo que "fijo": esos ejes SI se movieron en la carpeta, pero
+        # no en este modelo. Decirlo evita la lectura de que el barrido se quedo
+        # corto justo donde el modelo no podia responder.
+        partes.append(f"La carpeta tambien movio {', '.join(ajenos)}, que no "
+                      "afecta(n) a este modelo (otra formulacion): no se dibuja(n).")
     return " ".join(partes)
 
 
@@ -510,8 +574,9 @@ def generar(
     fijos = _fijos(combos, set(variables))
 
     df["modelo"] = [
-        _etiqueta_modelo(f, e, n)
-        for f, e, n in zip(df["formulacion"], df["entidad"], df["normalizacion"])
+        _etiqueta_modelo(f, e, n, d)
+        for f, e, n, d in zip(df["formulacion"], df["entidad"],
+                              df["normalizacion"], df["distancia"])
     ]
 
     # El score se calcula ANTES de aplicar los filtros: agrega TODAS las metricas
@@ -519,6 +584,10 @@ def generar(
     # un "score" distinto en cada ejecucion segun el flag, que es justo lo que no
     # puede pasar con un numero que se usa para ordenar modelos.
     entidad_de: dict[str, str] = dict(zip(df["modelo"], df["entidad"]))
+    celda_de: dict[str, tuple[str, str]] = {
+        m: (str(f), str(e))
+        for m, f, e in zip(df["modelo"], df["formulacion"], df["entidad"])
+    }
     if con_score:
         scores = puntuacion.puntuar(df)
         if scores.empty:
@@ -540,10 +609,36 @@ def generar(
         raise SystemExit("El filtro de --metricas/--modelos no deja ninguna serie.")
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    parejas = list(itertools.combinations(variables, 2))
-    print(f"Ejes barridos: {', '.join(variables)} -> {len(parejas)} pareja(s).")
+
+    # Cada modelo se dibuja SOLO sobre los ejes que le afectan (ver
+    # `ejes_del_modelo`). La lista global de parejas es la union de las suyas, en
+    # el orden de los ejes barridos, para que el orden de las figuras no dependa
+    # de que modelos haya.
+    ejes_de = {m: ejes_del_modelo(variables, *celda_de[m])
+               for m in sorted(set(df["modelo"]))}
+    parejas_de = {m: set(itertools.combinations(ejes, 2)) for m, ejes in ejes_de.items()}
+    parejas = [par for par in itertools.combinations(variables, 2)
+               if any(par in suyas for suyas in parejas_de.values())]
+
+    print(f"Ejes barridos en la carpeta: {', '.join(variables)}")
+    for modelo in ejes_de:
+        suyos = ejes_de[modelo] or ["(ninguno)"]
+        print(f"  {modelo}: {', '.join(suyos)} "
+              f"-> {len(parejas_de[modelo])} pareja(s)")
     if fijos:
         print("Ejes fijos: " + ", ".join(f"{k}={v}" for k, v in fijos.items()))
+
+    if not parejas:
+        detalle = "; ".join(f"{m}: {', '.join(e) or 'ninguno'}"
+                            for m, e in ejes_de.items())
+        raise SystemExit(
+            "Ningun modelo tiene DOS de sus propios ejes con mas de un valor, asi "
+            f"que no hay ninguna superficie que dibujar ({detalle}). Los ejes de "
+            "una formulacion no afectan a los modelos de la otra: barrer un eje F2 "
+            "y uno F5 da una curva por modelo, no una superficie. Amplia "
+            "HIPERPARAMETROS con un segundo eje de la formulacion que quieras ver, "
+            "o acota --modelos a los que si lo tengan."
+        )
 
     # La geometria de cada eje (escala + malla fina) depende solo de sus valores
     # barridos, asi que se resuelve una vez y la comparten todas las figuras: dos
@@ -560,7 +655,6 @@ def generar(
     vacias: list[str] = []
 
     for (eje_x, eje_y) in parejas:
-        resto = [e for e in variables if e not in (eje_x, eje_y)]
         ex, ey = geo[eje_x], geo[eje_y]
         vx, vy = variables[eje_x], variables[eje_y]
         etq_ejes = f"{eje_x} x {eje_y}"
@@ -568,10 +662,19 @@ def generar(
         rejillas_score: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         for metrica, dfm in df.groupby("metrica", sort=True):
             mejor = orientacion(str(metrica))
-            pie = _pie_de_figura(ex, ey, resto, reduccion, mejor, fijos)
-            if metrica == puntuacion.NOMBRE:
-                pie = PIE_SCORE + " " + pie
             for modelo, dfmm in dfm.groupby("modelo", sort=True):
+                # Esta pareja no es de este modelo: sus puntos caerian todos en la
+                # misma casilla (ver `ejes_del_modelo`).
+                if (eje_x, eje_y) not in parejas_de[str(modelo)]:
+                    continue
+                # El resto y los ajenos tambien son del modelo: reducir sobre un
+                # eje que no le afecta no es una proyeccion, es ruido en el pie.
+                resto = [e for e in ejes_de[str(modelo)]
+                         if e not in (eje_x, eje_y)]
+                ajenos = [e for e in variables if e not in ejes_de[str(modelo)]]
+                pie = _pie_de_figura(ex, ey, resto, reduccion, mejor, fijos, ajenos)
+                if metrica == puntuacion.NOMBRE:
+                    pie = PIE_SCORE + " " + pie
                 z_por_combo = dict(zip(dfmm["combinacion"], dfmm["valor"]))
                 Z = construir_rejilla(z_por_combo, combos, eje_x, vx, eje_y, vy,
                                       reduccion, mejor)
@@ -628,16 +731,27 @@ def generar(
                 else:
                     plt.close(fig)
 
-        # Comparativa: todos los modelos de una entidad sobre los mismos ejes. Es
-        # la unica figura que superpone modelos, y solo vale con el score porque
-        # es lo unico comparable entre ellos (z-scoreado dentro de la entidad).
-        # Jugador y equipo nunca se mezclan.
+        # Comparativa: los modelos de una entidad que comparten ESTOS ejes, uno
+        # sobre otro. Es la unica figura que superpone modelos, y solo vale con el
+        # score porque es lo unico comparable entre ellos (z-scoreado dentro de la
+        # entidad). Jugador y equipo nunca se mezclan.
+        #
+        # `rejillas_score` solo trae los modelos que se han dibujado en esta
+        # pareja, asi que el filtro por alcance ya esta aplicado: lo normal es que
+        # salgan las dos NORMALIZACIONES de una misma formulacion (que si comparten
+        # ejes). Dos formulaciones distintas solo coinciden aqui si lo que se barrio
+        # es un eje comun a las dos; superponerlas sobre los ejes de UNA de ellas
+        # —lo que se hacia antes— dibujaba la otra como un plano horizontal.
         for entidad in sorted({entidad_de.get(m, "?") for m in rejillas_score}):
             de_esa = {m: par for m, par in rejillas_score.items()
                       if entidad_de.get(m) == entidad}
             if len(de_esa) < 2:
                 continue
-            pie = PIE_SCORE + " " + _pie_de_figura(ex, ey, resto, reduccion, "max", fijos)
+            uno = sorted(de_esa)[0]
+            resto = [e for e in ejes_de[uno] if e not in (eje_x, eje_y)]
+            ajenos = [e for e in variables if e not in ejes_de[uno]]
+            pie = PIE_SCORE + " " + _pie_de_figura(
+                ex, ey, resto, reduccion, "max", fijos, ajenos)
             fig = dibujar_comparativa(plt, de_esa, ex, ey, str(entidad), pie,
                                       elev, azim)
             nombre = f"comparativa_{entidad}__{puntuacion.NOMBRE}__{eje_x}_x_{eje_y}.png"
@@ -708,7 +822,8 @@ def main(argv: list[str] | None = None) -> None:
                         "'top1,mrr,knn_accuracy'. Por defecto, todas las del CSV.")
     p.add_argument("--modelos", type=str, default=None,
                    help="Subconjunto de modelos por etiqueta compacta "
-                        "(F<formulacion>_<entidad>_<normalizacion>), coma-separado.")
+                        "(F<formulacion>_<entidad>_<normalizacion>_<distancia>), "
+                        "coma-separado. Ej.: 'F5_jugador_por_liga_euclidea'.")
     p.add_argument("--reduccion", choices=("max", "media"), default="max",
                    help="Como se reduce cada casilla cuando el barrido mueve mas "
                         "de dos ejes: 'max' = lo mejor alcanzable ahi (default), "

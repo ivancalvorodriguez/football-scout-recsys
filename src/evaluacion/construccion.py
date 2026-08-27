@@ -17,13 +17,14 @@ no de como se agrupen en entidades.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
 from src.similitud import config as scfg
 from src.similitud import data as sdata
-from src.similitud import distributional, slim
+from src.similitud import distancias, distributional, slim
+from src.similitud.distancias import Espacio
 from src.similitud.features import MatrizFeatures, construir as construir_features
 from src.similitud.modelo import IndiceEntidades, indexar_entidades
 
@@ -42,7 +43,16 @@ class Contexto:
     match_id: np.ndarray        # (M,) partido de cada observacion
     minutos_obs: np.ndarray     # (M,) minutos de cada observacion (equipo -> 1)
     idx_real: IndiceEntidades   # agrupacion real (0..P-1)
+    # Geometria con la que se mide (`src.similitud.distancias`). Es parte del
+    # contexto y no un argumento suelto porque la W cacheada aqui abajo se ajusta
+    # EN ella: dos distancias son dos contextos, no uno con un parametro.
+    espacio: Espacio = field(
+        default_factory=lambda: Espacio(distancias.POR_DEFECTO))
     _W: tuple | None = None     # cache de la W de la F2 (cols_idx, cols_val)
+
+    @property
+    def distancia(self) -> str:
+        return self.espacio.nombre
 
     @property
     def metodo_f5(self) -> str:
@@ -67,14 +77,45 @@ class Contexto:
                 max_iter=scfg.F2_MAX_ITER,
                 tol=scfg.F2_TOL,
                 progreso=progreso,
+                espacio=self.espacio,
             )
         return self._W
 
 
-def crear_contexto(db_path, entidad: str, normalizacion: str) -> Contexto:
-    """Carga la BD y construye el contexto (mf + metadatos alineados por fila)."""
+def crear_contexto(
+    db_path,
+    entidad: str,
+    normalizacion: str,
+    excluir_ligas: tuple[str, ...] = (),
+    estadisticas=None,
+    distancia: str = distancias.POR_DEFECTO,
+    espacio: Espacio | None = None,
+) -> Contexto:
+    """Carga la BD y construye el contexto (mf + metadatos alineados por fila).
+
+    ``excluir_ligas`` deja fuera las observaciones de esas competiciones ANTES de
+    estandarizar, que es lo que hace de esto un hold-out de verdad: la liga
+    excluida no entra en el ajuste y tampoco en las mu/sd del z-score (Fase 7,
+    ver `generalizacion`).
+
+    ``estadisticas`` son mu/sd congeladas de otro contexto, para poder poner
+    observaciones nuevas en el espacio de un ajuste anterior. Los dos parametros
+    son opcionales y por defecto no hacen nada: sin ellos, esto es el contexto de
+    siempre sobre la BD entera.
+
+    ``distancia`` es la geometria con la que se reconstruye la S, y tiene que ser
+    la MISMA con la que se ajusto el artefacto que se esta evaluando: las fases
+    comparan lo que reconstruye este contexto con la S del modelo. ``espacio``
+    permite pasar una geometria ya ajustada (la del estado warm) en vez de
+    reestimarla de estos datos, que es lo que hace falta cuando el contexto trae
+    observaciones que el ajuste no vio (Fase 7).
+    """
     df = sdata.cargar(db_path, entidad)
-    mf = construir_features(df, entidad, normalizacion=normalizacion)
+    if excluir_ligas:
+        df = df[~df[sdata.LEAGUE_KEY].astype(str).isin(set(excluir_ligas))]
+        df = df.reset_index(drop=True)
+    mf = construir_features(
+        df, entidad, normalizacion=normalizacion, estadisticas=estadisticas)
     match_id = df["match_id"].to_numpy()
     if entidad == "jugador":
         minutos = df["minutes_played"].to_numpy(dtype=float)
@@ -87,6 +128,8 @@ def crear_contexto(db_path, entidad: str, normalizacion: str) -> Contexto:
         match_id=match_id,
         minutos_obs=minutos,
         idx_real=indexar_entidades(mf),
+        espacio=(espacio if espacio is not None
+                 else distancias.preparar(mf.X, distancia)),
     )
 
 
@@ -135,7 +178,8 @@ def reconstruir_S_f5(
     bucle de la etapa distribucional (solo tiene efecto con el metodo sinkhorn).
     """
     mf = ctx.mf if weight is None else replace(ctx.mf, weight=weight)
-    S_pre = distributional.construir_S(mf, row_entity, n_ent, ctx.metodo_f5, progreso=progreso)
+    S_pre = distributional.construir_S(mf, row_entity, n_ent, ctx.metodo_f5,
+                                       progreso=progreso, espacio=ctx.espacio)
     B = slim.ease(S_pre, lam=scfg.F5_EASE_LAMBDA)
     S_post = S_pre @ B
     S_post = 0.5 * (S_post + S_post.T)
@@ -163,7 +207,8 @@ def reconstruir_S_cruda(ctx: Contexto, formulacion: str) -> np.ndarray:
         return slim.agregar_W_a_entidades(
             cols_idx, cols_val, row, ctx.mf.weight, P, simetrizar=False)
     if formulacion == "5":
-        S_pre = distributional.construir_S(ctx.mf, row, P, ctx.metodo_f5)
+        S_pre = distributional.construir_S(ctx.mf, row, P, ctx.metodo_f5,
+                                           espacio=ctx.espacio)
         R = S_pre @ slim.ease(S_pre, lam=scfg.F5_EASE_LAMBDA)
         np.fill_diagonal(R, 0.0)
         return R

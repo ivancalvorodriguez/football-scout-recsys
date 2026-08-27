@@ -28,11 +28,38 @@ Como se calcula:
 
 Una metrica constante en toda la entidad (varianza 0) aporta z=0 a todos: no
 discrimina, y meterla como NaN dejaria sin score a modelos perfectamente evaluados.
+
+**Cada metrica cuenta DOS veces: dentro y fuera de muestra.** La Fase 7
+(`generalizacion`) vuelve a medir lo mismo sobre una liga excluida del ajuste, y
+esa gemela entra en el score con su valor absoluto y el MISMO peso que su original
+(`FACTOR_GENERALIZACION` = 1.0): con las 8 metricas de siempre y sus 7 gemelas, el
+score agrega 15. Lo que se gana midiendo fuera de muestra es una senal que ninguna
+metrica en muestra detecta —todas se miden sobre las entidades del entrenamiento—,
+y con el mismo peso el score dice exactamente eso: cuenta la senal, no la pondera.
+
+Tres consecuencias que hay que tener presentes:
+
+- **No es una brecha, es el nivel.** Un modelo malo dentro y fuera tendria brecha
+  cero sin generalizar nada; la caida se sigue viendo en el informe de la fase,
+  que publica los dos ambitos uno al lado del otro.
+- **Solo las tienen los modelos que la fase puede medir.** El equipo no tiene
+  etiqueta de rol (ni pureza ni k-NN) y la F5 de equipo (Sinkhorn) no se sabe
+  proyectar, asi que ahi el score se renormaliza sobre las demas metricas, como
+  ya hacia con la pureza. Un barrido sin `--holdout` no tiene ninguna gemela y el
+  score es exactamente el de antes.
+- **Heredan la circularidad de su original**: `gen_pureza_top1` y
+  `gen_knn_accuracy` usan la posicion como etiqueta y la posicion es una feature
+  del jugador. Las que no son circulares son `gen_top1` y `gen_mrr` (nadie le ha
+  dicho al modelo que dos mitades de partidos son la misma persona). Es el motivo
+  por el que `FACTOR_GENERALIZACION` vale 1 y no 1.5: ponderar al alza la mitad
+  fuera de muestra pondera al alza tambien su parte circular.
 """
 
 from __future__ import annotations
 
 import pandas as pd
+
+from . import generalizacion
 
 # --------------------------------------------------------------------------- #
 # Orientacion y pesos                                                           #
@@ -54,7 +81,7 @@ def orientacion(metrica: str) -> str:
 # - Diversidad, cobertura y asimetria: higiene. Pesan poco a proposito, porque
 #   son facilmente "ganables" por un modelo malo (una S casi aleatoria da
 #   cobertura y diversidad altisimas).
-PESOS: dict[str, float] = {
+PESOS_EN_MUESTRA: dict[str, float] = {
     "top1": 1.0,
     "mrr": 1.0,
     "pureza_top1": 1.0,
@@ -63,6 +90,27 @@ PESOS: dict[str, float] = {
     "coverage": 0.25,
     "diversity": 0.25,
     "asimetria": 0.25,
+}
+
+# Cuanto pesa una metrica medida FUERA de muestra respecto de la misma metrica
+# medida sobre las entidades del ajuste. Vale 1: las dos mitades de cada metrica
+# pesan igual. Llego a valer 1.5 —aguantar el nivel en una liga que el modelo no
+# vio exige mas que aguantarlo en la que se ajusto—, pero ponderar al alza la
+# mitad fuera de muestra amplifica tambien las metricas CIRCULARES de esa mitad
+# (`gen_pureza_top1` y `gen_knn_accuracy` usan la posicion como etiqueta y la
+# posicion es una feature), y eso es justo lo que el score no debe premiar. Con
+# 1.0 la exigencia sigue contando —la gemela entra en el score— pero no se
+# multiplica. Un factor y no una tabla aparte, para que no puedan desincronizarse:
+# cambiar el peso de una metrica cambia el de su gemela.
+FACTOR_GENERALIZACION = 1.0
+
+# El diccionario final: cada metrica y, si la Fase 7 sabe medirla fuera de
+# muestra, su gemela `gen_<metrica>` con el peso multiplicado. `asimetria` no
+# tiene gemela (no hay S fuera de muestra: ver `generalizacion.SIN_GEMELA`).
+PESOS: dict[str, float] = {
+    **PESOS_EN_MUESTRA,
+    **{generalizacion.nombre_metrica(m): p * FACTOR_GENERALIZACION
+       for m, p in PESOS_EN_MUESTRA.items() if m in generalizacion.METRICAS},
 }
 
 NOMBRE = "score_compuesto"
@@ -135,8 +183,9 @@ def como_metrica(scores: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
     Asi el score viaja por el mismo camino que cualquier otra metrica (rejilla,
     figuras, CSV) sin duplicar codigo: es una metrica mas, llamada `score_compuesto`.
     """
-    ejes = (df[["modelo", "formulacion", "entidad", "normalizacion"]]
-            .drop_duplicates().set_index("modelo"))
+    columnas = ["modelo", "formulacion", "entidad", "normalizacion", "distancia"]
+    ejes = df[[c for c in columnas if c in df.columns]] \
+        .drop_duplicates().set_index("modelo")
     filas = []
     for r in scores.itertuples(index=False):
         if r.modelo not in ejes.index:
@@ -146,6 +195,7 @@ def como_metrica(scores: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
             "combinacion": r.combinacion, "modelo": r.modelo,
             "formulacion": e["formulacion"], "entidad": e["entidad"],
             "normalizacion": e["normalizacion"],
+            "distancia": e.get("distancia", "euclidea"),
             "fase": "score", "metrica": NOMBRE,
             "valor": getattr(r, NOMBRE),
         })

@@ -19,6 +19,7 @@ from typing import Any, Iterator
 
 import pytest
 
+from src.tests.app.e2e.sesion import Sesion, escribir_usuarios
 from src.tests.conftest import RAIZ_REPO, ejecutar_modulo
 
 pytestmark = [pytest.mark.e2e, pytest.mark.lento]
@@ -47,9 +48,15 @@ def _pedir(url: str, timeout: float = 10.0) -> tuple[int, str]:
 
 
 @pytest.fixture(scope="module")
-def servidor(dir_modelos: Path, bd: Path) -> Iterator[dict[str, Any]]:
-    """Levanta el servidor en un puerto libre y lo para al acabar el modulo."""
+def servidor(dir_modelos: Path, bd: Path,
+             tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]:
+    """Levanta el servidor en un puerto libre y lo para al acabar el modulo.
+
+    Con su propio registro de cuentas: la app entera exige sesion, asi que sin
+    una cuenta dada de alta no se podria comprobar nada de lo que sirve.
+    """
     puerto = _puerto_libre()
+    usuarios = escribir_usuarios(tmp_path_factory.mktemp("cuentas") / "usuarios.json")
     proceso = subprocess.Popen(
         [
             sys.executable, "-m", "src.app",
@@ -57,6 +64,7 @@ def servidor(dir_modelos: Path, bd: Path) -> Iterator[dict[str, Any]]:
             # Explicita a proposito: sin --bd caeria en la BD real del repo, si
             # existe, y el e2e dejaria de ser reproducible.
             "--bd", str(bd),
+            "--usuarios", str(usuarios),
             "--host", "127.0.0.1", "--puerto", str(puerto),
         ],
         cwd=str(RAIZ_REPO),
@@ -73,13 +81,16 @@ def servidor(dir_modelos: Path, bd: Path) -> Iterator[dict[str, Any]]:
             if proceso.poll() is not None:
                 pytest.fail(f"el servidor murio al arrancar:\n{proceso.communicate()[0]}")
             try:
-                _pedir(base + "/", timeout=1.0)
+                # `/login` es publica: responde en cuanto el servidor esta en pie.
+                _pedir(base + "/login", timeout=1.0)
                 break
             except OSError:
                 time.sleep(0.2)
         else:
             pytest.fail(f"el servidor no respondio en {ARRANQUE_MAX_S:.0f}s")
-        yield {"base": base, "proceso": proceso}
+        sesion = Sesion(base)
+        sesion.entrar()
+        yield {"base": base, "proceso": proceso, "sesion": sesion}
     finally:
         proceso.terminate()
         try:
@@ -90,7 +101,7 @@ def servidor(dir_modelos: Path, bd: Path) -> Iterator[dict[str, Any]]:
 
 class TestServidor:
     def test_sirve_el_buscador(self, servidor: dict) -> None:
-        codigo, cuerpo = _pedir(servidor["base"] + "/")
+        codigo, cuerpo = servidor["sesion"].get("/")
         assert codigo == 200
         assert "Buscar similares" in cuerpo
 
@@ -102,17 +113,15 @@ class TestServidor:
             assert codigo == 200 and cuerpo.strip()
 
     def test_consulta_completa_por_http(self, servidor: dict) -> None:
-        codigo, cuerpo = _pedir(
-            servidor["base"] + "/similares?entidad=jugador&nombre=Messi&k=3"
-        )
+        codigo, cuerpo = servidor["sesion"].get(
+            "/similares?entidad=jugador&nombre=Messi&k=3")
         assert codigo == 200
         assert "Lionel Messi" in cuerpo
         assert "Top 3 más similares" in cuerpo
 
     def test_la_api_responde_json(self, servidor: dict) -> None:
-        codigo, cuerpo = _pedir(
-            servidor["base"] + "/api/similares?entidad=equipo&nombre=Barcelona&k=2"
-        )
+        codigo, cuerpo = servidor["sesion"].get(
+            "/api/similares?entidad=equipo&nombre=Barcelona&k=2")
         assert codigo == 200
         datos = json.loads(cuerpo)
         assert datos["referencia"]["nombre"] == "Barcelona"
@@ -120,19 +129,20 @@ class TestServidor:
 
     def test_la_ficha_se_sirve_con_sus_figuras(self, servidor: dict) -> None:
         """El SVG del heptagono y el del campo se generan en el servidor."""
-        codigo, cuerpo = _pedir(servidor["base"] + "/jugador/10")
+        codigo, cuerpo = servidor["sesion"].get("/jugador/10")
         assert codigo == 200
         assert "radar-area" in cuerpo and "campo-juego" in cuerpo
 
     def test_un_nombre_inexistente_no_tumba_el_servidor(self, servidor: dict) -> None:
-        codigo, _ = _pedir(servidor["base"] + "/similares?entidad=jugador&nombre=Nadie")
+        codigo, _ = servidor["sesion"].get("/similares?entidad=jugador&nombre=Nadie")
         assert codigo == 404
-        assert _pedir(servidor["base"] + "/")[0] == 200
+        assert servidor["sesion"].get("/")[0] == 200
 
 
 class TestAyuda:
     def test_la_ayuda_documenta_las_opciones(self) -> None:
         res = ejecutar_modulo("src.app", "--help")
         assert res.returncode == 0
-        for opcion in ("--modelo", "--bd", "--host", "--puerto", "--debug"):
+        for opcion in ("--modelo", "--bd", "--host", "--puerto", "--debug",
+                       "--produccion", "--usuarios", "--hilos"):
             assert opcion in res.stdout

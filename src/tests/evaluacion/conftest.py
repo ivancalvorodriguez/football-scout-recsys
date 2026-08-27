@@ -20,6 +20,7 @@ import pytest
 
 from src.evaluacion import construccion, registro
 from src.extraccion import database as db
+from src.similitud.distancias import DISTANCIAS_VALIDAS
 from src.similitud.features import MatrizFeatures
 from src.similitud.modelo import ModeloSimilitud, indexar_entidades
 
@@ -192,31 +193,61 @@ def escribir_barrido(
 
 
 def fila_metrica(
-    combinacion: str, modelo: str, metrica: str, valor: float, *, fase: str = "1"
+    combinacion: str, modelo: str, metrica: str, valor: float, *, fase: str = "1",
+    distancia: str | None = None,
 ) -> dict[str, Any]:
-    """Fila de `barrido_metricas.csv` (el modelo ya descompuesto en sus tres ejes)."""
-    form, entidad, norm = modelo.lstrip("F").split("_", 2)
-    return {"combinacion": combinacion, "modelo": modelo, "formulacion": form,
-            "entidad": entidad, "normalizacion": norm,
+    """Fila de `barrido_metricas.csv` (el modelo ya descompuesto en sus cuatro ejes).
+
+    `modelo` se acepta con y sin el sufijo de distancia (`F5_equipo_global` o
+    `F5_equipo_global_euclidea`): sin el se asume `euclidea` —la unica geometria
+    que existia antes de que la distancia fuera un eje— y se completa la etiqueta,
+    que es exactamente lo que hace `registro._tipos` al leer una tabla antigua.
+    """
+    # Se parsea por la DERECHA: la normalizacion lleva guion bajo (`por_liga`),
+    # asi que partir por la izquierda la rompe en dos. El ultimo token es la
+    # distancia solo si es una de las conocidas; si no, el modelo viene sin ella.
+    form, entidad, resto = modelo.lstrip("F").split("_", 2)
+    if "_" in resto and resto.rsplit("_", 1)[1] in DISTANCIAS_VALIDAS:
+        norm, dist_en_nombre = resto.rsplit("_", 1)
+    else:
+        norm, dist_en_nombre = resto, None
+    dist = distancia or dist_en_nombre or "euclidea"
+    return {"combinacion": combinacion, "modelo": f"F{form}_{entidad}_{norm}_{dist}",
+            "formulacion": form, "entidad": entidad, "normalizacion": norm,
+            "distancia": dist,
             "fase": fase, "metrica": metrica, "valor": valor}
 
 
 @pytest.fixture
 def barrido_2x2(tmp_path: Path) -> Path:
-    """Barrido de dos ejes x dos valores, dos modelos y dos metricas.
+    """Barrido de dos ejes x dos valores POR FORMULACION, tres modelos, dos metricas.
 
     Es el minimo que da una superficie: dos ejes con mas de un valor cada uno.
+
+    Cada formulacion mueve LOS SUYOS, que es como sale de un barrido de verdad:
+    `F2_L1`/`F2_BETA` no entran en la huella de un modelo F5 ni
+    `F5_EASE_LAMBDA`/`F5_RFF_DIM` en la de uno F2 (ver `huella.alcance`), asi que
+    cada modelo se dibuja sobre su propia pareja de ejes. `F5_METODO_EQUIPO` se
+    queda constante para que haya tambien un eje FIJO que declarar en el pie.
+
+    Los dos modelos F5 (las dos normalizaciones) comparten ejes: son los que puede
+    superponer la figura comparativa del score.
     """
     combis = {
-        "v01": {"F2_L1": 0.25, "F2_BETA": 1.0, "F5_RFF_DIM": 512},
-        "v02": {"F2_L1": 0.5, "F2_BETA": 1.0, "F5_RFF_DIM": 512},
-        "v03": {"F2_L1": 0.25, "F2_BETA": 2.0, "F5_RFF_DIM": 512},
-        "v04": {"F2_L1": 0.5, "F2_BETA": 2.0, "F5_RFF_DIM": 512},
+        "v01": {"F2_L1": 0.25, "F2_BETA": 1.0, "F5_EASE_LAMBDA": 10.0,
+                "F5_RFF_DIM": 512, "F5_METODO_EQUIPO": "sinkhorn"},
+        "v02": {"F2_L1": 0.5, "F2_BETA": 1.0, "F5_EASE_LAMBDA": 50.0,
+                "F5_RFF_DIM": 512, "F5_METODO_EQUIPO": "sinkhorn"},
+        "v03": {"F2_L1": 0.25, "F2_BETA": 2.0, "F5_EASE_LAMBDA": 10.0,
+                "F5_RFF_DIM": 1024, "F5_METODO_EQUIPO": "sinkhorn"},
+        "v04": {"F2_L1": 0.5, "F2_BETA": 2.0, "F5_EASE_LAMBDA": 50.0,
+                "F5_RFF_DIM": 1024, "F5_METODO_EQUIPO": "sinkhorn"},
     }
     valores = {"v01": 0.10, "v02": 0.30, "v03": 0.20, "v04": 0.25}
     filas = []
     for combi, base in valores.items():
-        for i, modelo in enumerate(("F2_equipo_global", "F5_equipo_global")):
+        for i, modelo in enumerate(("F2_equipo_global", "F5_equipo_global",
+                                    "F5_equipo_por_liga")):
             filas.append(fila_metrica(combi, modelo, "top1", base + 0.05 * i))
             filas.append(fila_metrica(combi, modelo, "asimetria",
                                       0.5 - base, fase="0"))

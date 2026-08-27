@@ -1,0 +1,25 @@
+# Dependencias de la app web (`src/app`): el runtime del pipeline + Flask.
+#
+# El runtime entra con `-r` porque la app lo NECESITA de verdad, no por comodidad:
+# las fichas, el radar de fases, los valores crudos y la proyección fuera de
+# muestra son numpy/pandas (`servicio.py`, `fases.py`, `crudos.py`,
+# `proyeccion.py`), y `/datos` lanza los CLI de `src.incremental` con
+# `sys.executable`, es decir, DENTRO de este mismo entorno. Así
+# `pip install -r requirements-app.txt` basta por sí solo, igual que en
+# requirements-dev.txt (y `pip install -r requirements.txt -r requirements-app.txt`
+# sigue siendo válido).
+-r requirements.txt
+# El resto del proyecto (extracción, similitud, evaluación) no necesita Flask.
+# La app no añade ninguna dependencia numérica NUEVA: el heptágono y el campo se
+# calculan con el numpy que ya usa el pipeline y se dibujan en SVG inline.
+flask==3.1.2
+# Servidor WSGI para `python -m src.app --produccion` y `waitress-serve`. El
+# servidor integrado de Flask es de desarrollo (el propio Werkzeug lo avisa al
+# arrancar) y no debe atender tráfico real. Waitress es Python puro, funciona
+# igual en Windows y en Linux, y sirve con UN proceso y varios hilos, que es el
+# único modo compatible con esta app: su estado de tareas y sus catálogos viven
+# en memoria del proceso (ver docs/app_web.md).
+waitress==3.0.2
+# Autenticación, CSRF y hashing NO añaden dependencias: PBKDF2 sale de `hashlib`,
+# la comparación en tiempo constante de `hmac` y los tokens de `secrets`, todo de
+# la biblioteca estándar.

@@ -9,6 +9,14 @@ las métricas) vive en `contexto` y `crudos`, y entra aquí ya calculado.
 El ranking sale tal cual de `src.similitud.modelo.top_k` (misma salida que el CLI
 `probar`): la app no reordena ni filtra recomendaciones, solo las viste con el
 contexto necesario para leerlas (liga, fases y features en las que coinciden).
+
+Hay un segundo origen posible para ese ranking: una entidad que está en la base
+de datos elegida pero no en el modelo, colocada en él con `src.similitud.foldin`
+(ver `proyeccion`). Todo lo que rodea a la recomendación —radar, coincidencias,
+puntos fuertes— se calcula aquí igual en los dos casos, sobre el vector agregado
+de la entidad: el del artefacto (`feat_display`) si está dentro, y el que se
+deriva de la BD si se ha proyectado. Lo único que cambia es de dónde salen las
+puntuaciones, y eso lo dice `Recomendacion.proyectada`.
 """
 
 from __future__ import annotations
@@ -26,6 +34,17 @@ from .fases import MatrizFases, ValorFase
 
 class EntidadDesconocida(LookupError):
     """El identificador pedido no existe en el modelo."""
+
+
+class EntidadSinDatos(EntidadDesconocida):
+    """Está en el modelo pero no en la base de datos con la que se consulta.
+
+    Es un `EntidadDesconocida` a propósito: para quien consulta, una entidad de
+    la que la BD elegida no sabe nada **no existe**, y las vistas que ya tratan
+    el «no encontrado» no tienen que aprender un caso nuevo. Lo que cambia es el
+    mensaje, porque el motivo sí es distinto y tiene arreglo (elegir otra base de
+    datos), y por eso es una subclase y no el mismo error.
+    """
 
 
 # --- Presentación de features -------------------------------------------------
@@ -141,19 +160,41 @@ class Rasgo:
         return clase_z(self.valor, self.invertida)
 
 
+# Índice de una entidad que NO tiene fila en S (está en la BD y no en el modelo).
+# Se usa un centinela en vez de `None` porque el índice se compara y se ordena en
+# varios sitios, y un None obligaría a comprobarlo en todos ellos.
+FUERA_DEL_MODELO = -1
+
+
 @dataclass(frozen=True)
 class Entidad:
-    """Entidad del modelo lista para mostrar.
+    """Entidad lista para mostrar.
 
     `indice` es la fila/columna en S (la identidad interna) e `id` el
     `entity_id` de la BD: se expone ese en las URL porque es estable entre
     reconstrucciones del modelo, mientras que el índice depende del universo.
+
+    `indice` es `FUERA_DEL_MODELO` cuando la entidad solo está en la base de
+    datos: entonces no hay fila de S que leer y su recomendación se calcula
+    proyectándola (ver `recomendar_proyectada`).
+
+    `en_datos` es la otra mitad, y son cosas independientes: False significa que
+    el modelo sí la tiene pero la base de datos con la que se consulta no. Sale
+    igual —el artefacto trae su nombre, su liga y su vector, y puntuarla es
+    exactamente lo que el modelo sabe hacer— pero sin equipo, sin posiciones y
+    sin valores reales, y **sin ficha**: no se le puede pedir nada a ella (ver
+    `rutas._sin_datos`). La interfaz lo rotula y no la enlaza.
     """
 
     indice: int
     id: int
     nombre: str
     ligas: tuple[str, ...]
+    en_datos: bool = True
+
+    @property
+    def en_modelo(self) -> bool:
+        return self.indice != FUERA_DEL_MODELO
 
 
 @dataclass(frozen=True)
@@ -169,13 +210,20 @@ class Candidato:
 
 @dataclass(frozen=True)
 class Recomendacion:
-    """Resultado completo de una consulta: referencia + su top-k."""
+    """Resultado completo de una consulta: referencia + su top-k.
+
+    `proyectada` es la fidelidad de la proyección cuando la referencia no estaba
+    en el modelo (`foldin.FIEL` / `foldin.APROXIMADA`), y None cuando la
+    respuesta sale de la matriz S como siempre. La interfaz TIENE que
+    distinguirlas: no son la misma clase de respuesta.
+    """
 
     referencia: Entidad
     rasgos: tuple[Rasgo, ...]
     candidatos: tuple[Candidato, ...]
     k_pedido: int
     perfil: tuple[ValorFase, ...] = ()
+    proyectada: str | None = None
 
     @property
     def incompleto(self) -> bool:
@@ -190,12 +238,17 @@ class Recomendacion:
 
 @dataclass(frozen=True)
 class Ficha:
-    """Detalle de UNA entidad: su perfil por fases y dónde destaca o flaquea."""
+    """Detalle de UNA entidad: su perfil por fases y dónde destaca o flaquea.
+
+    `proyectada` tiene el mismo significado que en `Recomendacion`: la entidad no
+    está en el modelo y su vector se ha derivado de la base de datos.
+    """
 
     entidad: Entidad
     perfil: tuple[ValorFase, ...]
     destacados: tuple[Rasgo, ...]
     flojos: tuple[Rasgo, ...]
+    proyectada: str | None = None
 
 
 # --- Acceso a las entidades del modelo ----------------------------------------
@@ -211,8 +264,13 @@ def _ligas(modelo: ModeloSimilitud, indice: int) -> tuple[str, ...]:
     return tuple(por_entidad.get(str(modelo.entity_ids[indice]), ()))
 
 
-def entidad(modelo: ModeloSimilitud, indice: int) -> Entidad:
-    """Entidad de la fila `indice` de S."""
+def entidad(modelo: ModeloSimilitud, indice: int,
+            sin_datos: frozenset[int] = frozenset()) -> Entidad:
+    """Entidad de la fila `indice` de S.
+
+    `sin_datos` son los índices que la base de datos de la consulta no tiene: no
+    se ocultan, se marcan (`en_datos=False`). Ver `Entidad`.
+    """
     if not 0 <= indice < len(modelo.entity_names):
         raise EntidadDesconocida(f"Índice de entidad fuera de rango: {indice}.")
     return Entidad(
@@ -220,21 +278,49 @@ def entidad(modelo: ModeloSimilitud, indice: int) -> Entidad:
         id=int(modelo.entity_ids[indice]),
         nombre=modelo.entity_names[indice],
         ligas=_ligas(modelo, indice),
+        en_datos=indice not in sin_datos,
     )
 
 
-def indice_por_id(modelo: ModeloSimilitud, entity_id: int) -> int:
-    """Fila de S de un `entity_id` de la BD."""
+def indice_por_id(modelo: ModeloSimilitud, entity_id: int,
+                  sin_datos: frozenset[int] = frozenset()) -> int:
+    """Fila de S de un `entity_id` de la BD.
+
+    Con `sin_datos` (índices que la base de datos de la consulta no tiene) el
+    resultado no vale aunque el modelo lo conozca: se levanta `EntidadSinDatos`.
+    """
     coincide = np.flatnonzero(modelo.entity_ids == entity_id)
     if coincide.size == 0:
         raise EntidadDesconocida(f"No hay ninguna entidad con id {entity_id}.")
-    return int(coincide[0])
+    indice = int(coincide[0])
+    if indice in sin_datos:
+        raise EntidadSinDatos(sin_datos_texto(modelo, indice))
+    return indice
+
+
+def sin_datos_texto(modelo: ModeloSimilitud, indice: int) -> str:
+    """Por qué no se puede responder por una entidad que la BD no tiene.
+
+    Se redacta aquí y no en la plantilla porque lo comparten la página, la API y
+    las dos vistas (top-k y ficha), y porque el mensaje tiene que decir las dos
+    mitades: que el modelo sí la conoce (si no, parecería un error de búsqueda) y
+    que lo que falta son sus datos.
+    """
+    etiqueta = config.ETIQUETA_ENTIDAD.get(modelo.entidad, modelo.entidad).lower()
+    nombre = modelo.entity_names[indice]
+    return (
+        f"«{nombre}» está en el modelo, pero el conjunto de datos con el que se "
+        f"está consultando no tiene a este {etiqueta}. Sin sus estadísticas no "
+        "se pueden calcular recomendaciones: elige el conjunto de datos con el "
+        "que se entrenó el modelo, o uno que lo incluya."
+    )
 
 
 # --- Búsqueda por nombre ------------------------------------------------------
 
 def buscar(
-    modelo: ModeloSimilitud, texto: str, limite: int = config.MAX_SUGERENCIAS
+    modelo: ModeloSimilitud, texto: str, limite: int = config.MAX_SUGERENCIAS,
+    sin_datos: frozenset[int] = frozenset(),
 ) -> list[Entidad]:
     """Entidades cuyo nombre contiene `texto` (sin acentos ni mayúsculas).
 
@@ -243,13 +329,33 @@ def buscar(
     A diferencia de `consulta.resolver`, que falla ante la ambigüedad porque debe
     devolver UNA entidad, aquí la ambigüedad es el caso normal: el usuario está
     escribiendo y elegirá después.
+
+    `sin_datos` son índices de S que la base de datos de la consulta no tiene y
+    que por tanto no se ofrecen: sin sus observaciones no hay nada que enseñar de
+    ellos ni forma de justificar una recomendación (ver `rutas._sin_datos`).
     """
     objetivo = normalizar(texto)
     if not objetivo:
         return []
+    pares = (
+        (i, n) for i, n in enumerate(modelo.entity_names) if i not in sin_datos
+    )
+    encontrados = _coincidencias_nombre(pares, objetivo)
+    if limite > 0:
+        encontrados = encontrados[:limite]
+    return [entidad(modelo, i) for _, _, i in encontrados]
+
+
+def _coincidencias_nombre(pares, objetivo: str) -> list[tuple[int, str, int]]:
+    """(calidad, nombre normalizado, clave) de los nombres que contienen `objetivo`.
+
+    Calidad 0 = exacta, 1 = por el principio, 2 = en cualquier posición. El orden
+    resultante es el de la lista de sugerencias, y se comparte entre las entidades
+    del modelo y las que solo están en la BD para que las dos se ordenen igual.
+    """
     encontrados: list[tuple[int, str, int]] = []
-    for i, nombre in enumerate(modelo.entity_names):
-        norm = normalizar(nombre)
+    for clave, nombre in pares:
+        norm = normalizar(str(nombre))
         if norm == objetivo:
             calidad = 0
         elif norm.startswith(objetivo):
@@ -258,11 +364,39 @@ def buscar(
             calidad = 2
         else:
             continue
-        encontrados.append((calidad, norm, i))
+        encontrados.append((calidad, norm, clave))
     encontrados.sort()
+    return encontrados
+
+
+def buscar_ausentes(
+    modelo: ModeloSimilitud,
+    nombres_bd: dict[int, str] | None,
+    texto: str,
+    limite: int = config.MAX_SUGERENCIAS,
+) -> list[Entidad]:
+    """Entidades de la BD que el modelo NO tiene y cuyo nombre contiene `texto`.
+
+    Son las candidatas a proyectarse. Se devuelven con `indice`
+    `FUERA_DEL_MODELO` y sin ligas: la liga sale del artefacto
+    (`meta["ligas_por_entidad"]`) y estas no están en él, así que se rellenan al
+    proyectar, que es cuando se leen sus observaciones.
+
+    Sin BD (`nombres_bd is None`) no hay nada que añadir: la búsqueda se queda
+    con las entidades del modelo, como antes.
+    """
+    objetivo = normalizar(texto)
+    if not objetivo or not nombres_bd:
+        return []
+    del_modelo = {int(i) for i in modelo.entity_ids}
+    fuera = ((i, n) for i, n in nombres_bd.items() if int(i) not in del_modelo)
+    encontrados = _coincidencias_nombre(fuera, objetivo)
     if limite > 0:
         encontrados = encontrados[:limite]
-    return [entidad(modelo, i) for _, _, i in encontrados]
+    return [
+        Entidad(indice=FUERA_DEL_MODELO, id=int(i), nombre=str(nombres_bd[i]), ligas=())
+        for _, _, i in encontrados
+    ]
 
 
 # --- Explicación de las recomendaciones ---------------------------------------
@@ -297,6 +431,19 @@ def _crudo(crudos: np.ndarray | None, i: int, col: int) -> float | None:
     return None if not np.isfinite(valor) else valor
 
 
+def _fila(crudos: np.ndarray | None, i: int) -> np.ndarray | None:
+    """Los valores reales de la entidad `i`, o None si no hay tabla."""
+    return None if crudos is None else np.asarray(crudos)[i]
+
+
+def _valor(fila: np.ndarray | None, col: int) -> float | None:
+    """Un valor real suelto de una fila ya extraída (mismo criterio que `_crudo`)."""
+    if fila is None:
+        return None
+    valor = float(fila[col])
+    return None if not np.isfinite(valor) else valor
+
+
 def coincidencias(
     modelo: ModeloSimilitud,
     i: int,
@@ -320,13 +467,34 @@ def coincidencias(
     Es un resumen a posteriori sobre `feat_display`, que NO participó en el
     ajuste del modelo: sirve para interpretar la recomendación, no la produce.
     """
+    return coincidencias_de(
+        modelo,
+        modelo.feat_display[i], modelo.feat_display[j],
+        _fila(crudos, i), _fila(crudos, j),
+        n=n,
+    )
+
+
+def coincidencias_de(
+    modelo: ModeloSimilitud,
+    ref: np.ndarray,
+    cand: np.ndarray,
+    crudo_ref: np.ndarray | None = None,
+    crudo_cand: np.ndarray | None = None,
+    n: int = config.N_COINCIDENCIAS,
+) -> tuple[Coincidencia, ...]:
+    """`coincidencias` a partir de los VECTORES, no de dos filas del modelo.
+
+    Misma regla y mismo resultado; lo que cambia es que la referencia puede no
+    tener fila en el artefacto (entidad proyectada), y entonces su vector se
+    deriva de la base de datos. Es la única diferencia entre explicar una
+    recomendación del modelo y explicar una proyectada.
+    """
     if n <= 0:
         return ()
     cols = _columnas_metricas(modelo)
     if not cols:
         return ()
-    ref = modelo.feat_display[i]
-    cand = modelo.feat_display[j]
     relevancia = np.abs(ref[cols]) - np.abs(ref[cols] - cand[cols])
     orden = [cols[p] for p in np.argsort(relevancia)[::-1][:n]]
     mapa = fases.fase_por_feature(modelo.entidad)
@@ -335,8 +503,8 @@ def coincidencias(
             feature=modelo.feat_names[f],
             referencia=float(ref[f]),
             candidato=float(cand[f]),
-            referencia_cruda=_crudo(crudos, i, f),
-            candidato_cruda=_crudo(crudos, j, f),
+            referencia_cruda=_valor(crudo_ref, f),
+            candidato_cruda=_valor(crudo_cand, f),
             invertida=modelo.feat_names[f] in fases.FEATURES_INVERTIDAS,
             fase=_etiqueta_fase(mapa, modelo.feat_names[f]),
             entidad=modelo.entidad,
@@ -372,18 +540,27 @@ def rasgos(
     Perfil rápido de la referencia (mismos caveats que `coincidencias`: se ordena
     por z-score, se enseña el valor real y la posición queda fuera).
     """
+    return rasgos_de(modelo, modelo.feat_display[i], _fila(crudos, i), n=n)
+
+
+def rasgos_de(
+    modelo: ModeloSimilitud,
+    valores: np.ndarray,
+    crudo: np.ndarray | None = None,
+    n: int = config.N_COINCIDENCIAS,
+) -> tuple[Rasgo, ...]:
+    """`rasgos` a partir del VECTOR de la entidad (ver `coincidencias_de`)."""
     if n <= 0:
         return ()
     cols = _columnas_metricas(modelo)
     if not cols:
         return ()
-    valores = modelo.feat_display[i]
     orden = [cols[p] for p in np.argsort(np.abs(valores[cols]))[::-1][:n]]
     return tuple(
         Rasgo(
             feature=modelo.feat_names[f],
             valor=float(valores[f]),
-            crudo=_crudo(crudos, i, f),
+            crudo=_valor(crudo, f),
             invertida=modelo.feat_names[f] in fases.FEATURES_INVERTIDAS,
             entidad=modelo.entidad,
         )
@@ -393,8 +570,8 @@ def rasgos(
 
 # --- Puntos fuertes y débiles -------------------------------------------------
 
-def _orientadas(modelo: ModeloSimilitud, i: int) -> tuple[np.ndarray, list[int]]:
-    """z-scores de la entidad `i` con «más es mejor» en todas las columnas.
+def _orientadas(modelo: ModeloSimilitud, valores: np.ndarray) -> tuple[np.ndarray, list[int]]:
+    """z-scores de una entidad con «más es mejor» en todas las columnas.
 
     Devuelve (valores orientados, columnas usadas). Las métricas de
     `fases.FEATURES_INVERTIDAS` cambian de signo: sin eso, «le regatean mucho»
@@ -403,26 +580,26 @@ def _orientadas(modelo: ModeloSimilitud, i: int) -> tuple[np.ndarray, list[int]]
     cols = _columnas_metricas(modelo)
     if not cols:
         return np.zeros(0), cols
-    valores = np.array([float(modelo.feat_display[i, c]) for c in cols])
+    orientados = np.array([float(valores[c]) for c in cols])
     signos = np.array([
         -1.0 if modelo.feat_names[c] in fases.FEATURES_INVERTIDAS else 1.0
         for c in cols
     ])
-    return valores * signos, cols
+    return orientados * signos, cols
 
 
 def _rasgo(
     modelo: ModeloSimilitud,
-    i: int,
+    valores: np.ndarray,
     col: int,
     mapa_fases: dict,
-    crudos: np.ndarray | None,
+    crudo: np.ndarray | None,
 ) -> Rasgo:
     nombre = modelo.feat_names[col]
     return Rasgo(
         feature=nombre,
-        valor=float(modelo.feat_display[i, col]),
-        crudo=_crudo(crudos, i, col),
+        valor=float(valores[col]),
+        crudo=_valor(crudo, col),
         invertida=nombre in fases.FEATURES_INVERTIDAS,
         fase=_etiqueta_fase(mapa_fases, nombre),
         entidad=modelo.entidad,
@@ -449,9 +626,20 @@ def destacados_y_flojos(
     modelo tiene menos de `2n` métricas: con pocas features, pedir 4 y 4 haría
     que la misma métrica apareciese a la vez como punto fuerte y como débil.
     """
+    return destacados_y_flojos_de(
+        modelo, modelo.feat_display[i], _fila(crudos, i), n=n)
+
+
+def destacados_y_flojos_de(
+    modelo: ModeloSimilitud,
+    valores: np.ndarray,
+    crudo: np.ndarray | None = None,
+    n: int = config.N_RASGOS_FICHA,
+) -> tuple[tuple[Rasgo, ...], tuple[Rasgo, ...]]:
+    """`destacados_y_flojos` a partir del VECTOR (ver `coincidencias_de`)."""
     if n <= 0:
         return (), ()
-    orientadas, cols = _orientadas(modelo, i)
+    orientadas, cols = _orientadas(modelo, valores)
     if not cols:
         return (), ()
     n = min(n, len(cols) // 2)
@@ -462,8 +650,8 @@ def destacados_y_flojos(
     peores = [cols[p] for p in orden[:n]]
     mejores = [cols[p] for p in orden[::-1][:n]]
     return (
-        tuple(_rasgo(modelo, i, c, mapa, crudos) for c in mejores),
-        tuple(_rasgo(modelo, i, c, mapa, crudos) for c in peores),
+        tuple(_rasgo(modelo, valores, c, mapa, crudo) for c in mejores),
+        tuple(_rasgo(modelo, valores, c, mapa, crudo) for c in peores),
     )
 
 
@@ -488,12 +676,19 @@ def recomendar(
     n_coincidencias: int = config.N_COINCIDENCIAS,
     matriz: MatrizFases | None = None,
     crudos: np.ndarray | None = None,
+    sin_datos: frozenset[int] = frozenset(),
 ) -> Recomendacion:
-    """Top-k del modelo para la entidad `indice`, con su explicación."""
-    referencia = entidad(modelo, indice)
+    """Top-k del modelo para la entidad `indice`, con su explicación.
+
+    `sin_datos` **no filtra el ranking**: el top-k es el del modelo entero y las
+    candidatas que la base de datos de la consulta no tiene salen marcadas
+    (`Entidad.en_datos`). Ocultarlas escondería lo que el modelo sí sabe; lo que
+    no se puede es preguntarles a ellas (eso lo corta `rutas._sin_datos`).
+    """
+    referencia = entidad(modelo, indice, sin_datos)
     candidatos = tuple(
         Candidato(
-            entidad=entidad(modelo, j),
+            entidad=entidad(modelo, j, sin_datos),
             rango=rango,
             score=score,
             coincidencias=coincidencias(
@@ -526,4 +721,113 @@ def ficha(
         perfil=perfil(matriz, indice),
         destacados=destacados,
         flojos=flojos,
+    )
+
+
+# --- Consulta de una entidad que no está en el modelo -------------------------
+
+def matriz_ampliada(
+    modelo: ModeloSimilitud, display: np.ndarray
+) -> tuple[MatrizFases, int]:
+    """Perfil por fases del modelo CON una entidad más al final.
+
+    Devuelve (matriz, índice de la entidad añadida). El radar de una entidad es
+    su promedio por fase convertido a **percentil dentro del universo del
+    modelo** (`fases.construir_matriz`), así que para poder dibujar el de una
+    entidad proyectada hay que meterla en ese universo: con su vector aparte no
+    hay percentil que calcular.
+
+    Añadirla mueve los percentiles de los demás en 1/(P+1), que a P = 2640 es
+    ruido invisible; a cambio, la referencia y sus candidatos se leen en la misma
+    escala, que es la condición para que el radar comparado signifique algo.
+    """
+    ampliado = np.vstack([modelo.feat_display, np.asarray(display)[None, :]])
+    matriz = fases.construir_matriz(modelo.entidad, modelo.feat_names, ampliado)
+    return matriz, len(modelo.entity_ids)
+
+
+def recomendar_proyectada(
+    modelo: ModeloSimilitud,
+    proyectada,
+    k: int = config.TOP_K_DEFECTO,
+    n_coincidencias: int = config.N_COINCIDENCIAS,
+    crudos: np.ndarray | None = None,
+    crudo_referencia: np.ndarray | None = None,
+    sin_datos: frozenset[int] = frozenset(),
+) -> Recomendacion:
+    """Top-k de una entidad que está en la BD y no en el modelo.
+
+    `proyectada` es un `proyeccion.Proyectada`: trae la puntuación contra cada
+    entidad del modelo y el vector agregado de la entidad. Se tipa por
+    duck-typing y no importando el módulo porque ese vive en la capa de Flask/BD
+    y este es el dominio; lo que se necesita de él son tres atributos.
+
+    El resto —qué candidatos, en qué coinciden, qué radar— se calcula con las
+    MISMAS funciones que una consulta normal: la diferencia empieza y acaba en de
+    dónde salen las puntuaciones.
+
+    `sin_datos` tiene el mismo papel que en `recomendar`: marca a las candidatas
+    que la BD de la consulta no tiene, sin quitarlas del ranking.
+    """
+    matriz, indice_ref = matriz_ampliada(modelo, proyectada.display)
+    referencia = Entidad(
+        indice=FUERA_DEL_MODELO,
+        id=int(proyectada.id),
+        nombre=str(proyectada.nombre),
+        ligas=tuple(proyectada.ligas),
+    )
+    por_id = {int(e): j for j, e in enumerate(modelo.entity_ids)}
+    candidatos = tuple(
+        Candidato(
+            entidad=entidad(modelo, por_id[eid], sin_datos),
+            rango=rango,
+            score=score,
+            coincidencias=coincidencias_de(
+                modelo,
+                proyectada.display, modelo.feat_display[por_id[eid]],
+                crudo_referencia, _fila(crudos, por_id[eid]),
+                n=n_coincidencias,
+            ),
+            perfil=perfil(matriz, por_id[eid]),
+        )
+        for rango, (eid, score) in enumerate(proyectada.proyeccion.top(k), 1)
+        if eid in por_id
+    )
+    return Recomendacion(
+        referencia=referencia,
+        rasgos=rasgos_de(
+            modelo, proyectada.display, crudo_referencia, n=n_coincidencias),
+        candidatos=candidatos,
+        k_pedido=k,
+        perfil=perfil(matriz, indice_ref),
+        proyectada=proyectada.fidelidad,
+    )
+
+
+def ficha_proyectada(
+    modelo: ModeloSimilitud,
+    proyectada,
+    n_rasgos: int = config.N_RASGOS_FICHA,
+    crudo_referencia: np.ndarray | None = None,
+) -> Ficha:
+    """Detalle de una entidad que está en la BD y no en el modelo.
+
+    Su perfil y sus puntos fuertes son tan válidos como los de cualquier otra
+    (salen del mismo vector de features estandarizado con las mismas mu/sd); lo
+    único que no existe es su fila de S, y la ficha no la usa.
+    """
+    matriz, indice = matriz_ampliada(modelo, proyectada.display)
+    destacados, flojos = destacados_y_flojos_de(
+        modelo, proyectada.display, crudo_referencia, n=n_rasgos)
+    return Ficha(
+        entidad=Entidad(
+            indice=FUERA_DEL_MODELO,
+            id=int(proyectada.id),
+            nombre=str(proyectada.nombre),
+            ligas=tuple(proyectada.ligas),
+        ),
+        perfil=perfil(matriz, indice),
+        destacados=destacados,
+        flojos=flojos,
+        proyectada=proyectada.fidelidad,
     )

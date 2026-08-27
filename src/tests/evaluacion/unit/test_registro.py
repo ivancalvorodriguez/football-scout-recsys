@@ -406,7 +406,25 @@ class TestMetricasAcumuladas:
         previa = pd.DataFrame([self._fila("v01", "F2_equipo_global", "top1", 0.1)])
         nueva = pd.DataFrame([self._fila("v01", "F5_equipo_global", "top1", 0.9)])
         fundida = registro.acumular(previa, nueva)
-        assert set(fundida["modelo"]) == {"F2_equipo_global", "F5_equipo_global"}
+        assert set(fundida["modelo"]) == {"F2_equipo_global_euclidea",
+                                          "F5_equipo_global_euclidea"}
+
+    def test_una_tabla_sin_distancia_se_migra_al_leerla(self) -> None:
+        """Las carpetas de barrido ya acumuladas no tienen la columna: se midieron
+        con la euclidea, que era la unica. Sin rellenarla, esas filas y las nuevas
+        de la MISMA configuracion tendrian etiquetas distintas y se acumularian
+        como dos modelos en vez de fundirse.
+        """
+        antigua = pd.DataFrame([{
+            "combinacion": "v01", "modelo": "F2_equipo_global", "formulacion": "2",
+            "entidad": "equipo", "normalizacion": "global", "fase": "1",
+            "metrica": "top1", "valor": 0.1,
+        }])
+        nueva = pd.DataFrame([self._fila("v01", "F2_equipo_global", "top1", 0.9)])
+        fundida = registro.acumular(antigua, nueva)
+        assert set(fundida["distancia"]) == {"euclidea"}
+        assert set(fundida["modelo"]) == {"F2_equipo_global_euclidea"}
+        assert fundida["valor"].tolist() == [0.9]
 
     def test_la_sustitucion_es_por_metrica_no_por_combinacion_entera(self) -> None:
         previa = pd.DataFrame([self._fila("v01", "F2_equipo_global", "mrr", 0.3)])
