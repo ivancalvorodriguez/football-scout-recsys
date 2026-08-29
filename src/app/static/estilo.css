@@ -91,14 +91,6 @@ body {
 
 code, pre { font-family: "Cascadia Mono", Consolas, "Courier New", monospace; }
 
-.comandos {
-  background: #101a15;
-  color: #d7e6de;
-  padding: 0.8rem 1rem;
-  border-radius: var(--radio);
-  overflow-x: auto;
-  font-size: 0.85rem;
-}
 
 /* --- Buscador ------------------------------------------------------------ */
 

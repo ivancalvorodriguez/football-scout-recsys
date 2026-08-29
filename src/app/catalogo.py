@@ -343,7 +343,7 @@ class Catalogo:
         if not candidatos:
             raise ModeloNoDisponible(
                 f"No hay ningún modelo de '{entidad}' disponible. "
-                f"Constrúyelos con: python -m src.similitud.build"
+                "Hay que construir antes los modelos de similitud."
             )
         if variante is not None:
             for clave in candidatos:

@@ -158,7 +158,7 @@ class TestResolver:
         assert Catalogo(tmp_path).resolver("jugador", USUARIO).variante == "unico"
 
     def test_sin_modelos_de_esa_entidad(self, tmp_path: Path) -> None:
-        with pytest.raises(ModeloNoDisponible, match="build"):
+        with pytest.raises(ModeloNoDisponible, match="construir"):
             Catalogo(tmp_path).resolver("jugador", USUARIO)
 
     def test_un_modelo_que_no_cubre_esa_entidad(

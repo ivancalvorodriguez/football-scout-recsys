@@ -8,12 +8,15 @@
     <p class="aviso">
       {{ mensaje if mensaje else 'No se ha encontrado ningún artefacto de modelo en ' ~ model_dir ~ '.' }}
     </p>
-    <p class="ayuda">La app no entrena nada: consume lo que deja el pipeline. Desde la raíz del repo:</p>
-    <pre class="comandos"><code>python -m src.extraccion.extract      # 1) eventos StatsBomb -> outputs/db/scouting.db
-python -m src.similitud.build         # 2) modelos -> outputs/modelo/</code></pre>
     <p class="ayuda">
-      Con los artefactos en <code>{{ model_dir }}</code>, recarga esta página: el
-      catálogo los detecta sin reiniciar el servidor.
+      Esta página no entrena nada: solo sirve modelos ya construidos. Hay que
+      preparar antes los dos pasos previos —extraer las estadísticas de los
+      partidos de StatsBomb y, con ellas, construir los modelos de similitud—,
+      que se lanzan desde la línea de comandos del proyecto.
+    </p>
+    <p class="ayuda">
+      Con los modelos ya en <code>{{ model_dir }}</code>, recarga esta página: se
+      detectan sin reiniciar el servidor.
     </p>
   </section>
 {% endblock %}

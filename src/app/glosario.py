@@ -280,7 +280,9 @@ DEFINICIONES: dict[str, str] = {
     "np_goals": "Goles marcados sin contar los de penalti.",
     "shots_on_target": (
         "Remates que van entre los tres palos, incluidos los que bloquea el último "
-        "defensor."
+        "defensor. No cuenta los penaltis, aunque el nombre no lleve el prefijo "
+        "np_ como np_shots o np_goals: es el criterio de StatsBomb y FBref, y es "
+        "lo que hace que sot_pct divida dos cuentas comparables."
     ),
     "xg": (
         "Goles esperados: probabilidad de gol de cada remate según el modelo de "
@@ -296,8 +298,8 @@ DEFINICIONES: dict[str, str] = {
         "Toques dentro del área rival: presencia en la zona de máxima amenaza."
     ),
     "sot_pct": (
-        "Remates a puerta ÷ remates sin penaltis. Es puntería, distinta de la "
-        "calidad de la ocasión."
+        "Remates a puerta ÷ remates intentados, los dos sin contar penaltis. Es "
+        "puntería, distinta de la calidad de la ocasión."
     ),
     "npxg_per_shot": (
         "npxG ÷ remates sin penaltis: calidad media del disparo. Distingue a quien "

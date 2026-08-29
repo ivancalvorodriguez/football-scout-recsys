@@ -69,8 +69,8 @@
                 </ul>
               {% elif d.conjunto.es_base %}
                 <p class="apunte">
-                  No hay base de datos en <code>{{ ruta_bd }}</code>. Extráela con
-                  <code>python -m src.extraccion.extract</code>.
+                  No hay base de datos en <code>{{ ruta_bd }}</code>: todavía
+                  no se han extraído las estadísticas de los partidos.
                 </p>
               {% else %}
                 <p class="aviso aviso-menor">
@@ -191,8 +191,9 @@
     <p class="ayuda">
       El paquete es una carpeta con el formato de StatsBomb Open Data
       (<code>competitions.json</code>, <code>matches/</code>, <code>events/</code>,
-      <code>lineups/</code>). Los campos exigidos están en <code>docs/incremental.md</code>.
-      Reprocesar un partido que ya estaba lo actualiza, no lo duplica.
+      <code>lineups/</code>). «Solo validar» comprueba antes de nada que están
+      todos los campos que hacen falta. Reprocesar un partido que ya estaba lo
+      actualiza, no lo duplica.
     </p>
     <p class="ayuda">
       El resultado es un <strong>conjunto de datos nuevo</strong>: se copia el que
@@ -274,8 +275,8 @@
          va siempre el motivo. #}
       {% if not conjuntos %}
         <p class="apunte">
-          Hace falta una base de datos de partida: extráela con
-          <code>python -m src.extraccion.extract</code>.
+          Hace falta una base de datos de partida: hay que extraer antes las
+          estadísticas de los partidos.
         </p>
       {% elif not cuota_datos.hay_hueco %}
         <p class="aviso aviso-menor">
@@ -352,8 +353,8 @@
       </div>
       {% if not origenes %}
         <p class="apunte">
-          Hace falta un modelo de partida: constrúyelo con
-          <code>python -m src.similitud.build</code>.
+          Hace falta un modelo de partida: hay que construir antes el modelo
+          base.
         </p>
       {% elif not cuota_modelos.hay_hueco %}
         <p class="aviso aviso-menor">

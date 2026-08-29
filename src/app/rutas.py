@@ -141,7 +141,7 @@ def _entidad_pedida() -> str:
         if not disponibles:
             raise ModeloNoDisponible(
                 f"No hay ningún modelo en {_catalogo().model_dir}. "
-                f"Constrúyelos con: python -m src.similitud.build"
+                "Hay que construir antes los modelos de similitud."
             )
         return disponibles[0]
     if entidad not in config.ENTIDADES:

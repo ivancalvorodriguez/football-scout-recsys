@@ -43,7 +43,12 @@ class TestInicio:
             tmp_path / "vacio", ruta_usuarios=fichero_usuarios, testing=True))
         r = cliente.get("/")
         assert r.status_code == 503
-        assert "src.similitud.build" in _texto(r)
+        html = _texto(r)
+        # La pagina explica que faltan los modelos y que hay que construirlos
+        # antes, pero sin nombrar modulos ni ficheros del codigo: la interfaz no
+        # cita rutas del repositorio.
+        assert "construir" in html.lower()
+        assert "src." not in html and "docs/" not in html
 
 
 class TestSimilares:

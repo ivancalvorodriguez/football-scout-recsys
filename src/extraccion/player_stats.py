@@ -99,6 +99,9 @@ def compute_player_stats(events: list[dict[str, Any]]) -> dict[int, dict[str, An
                 r["npxg"] += xg
                 if outcome == "Goal":
                     r["np_goals"] += 1
+                # `shots_on_target` tambien va aqui dentro: excluye penaltis pese
+                # a no llamarse `np_*`. Es el criterio de StatsBomb/FBref y lo que
+                # hace homogeneo el `sot_pct` = shots_on_target / np_shots.
                 if outcome in config.SHOT_ON_TARGET_OUTCOMES:
                     r["shots_on_target"] += 1
 
